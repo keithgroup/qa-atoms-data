@@ -1,0 +1,3585 @@
+#INFO: **** input file is /ihome/jkeith/amm503/projects/apdft/atom-redo/h/h.chrg-2.mult2/h.chrg-2.mult2-pyscf.apdft-ccsdt.augccpvdz/apdft-pyscf-calc.py ****
+
+import os
+import pathlib
+import re
+import numpy as np
+import json
+import pyscf
+import pyscf.gto
+import pyscf.qmmm
+from pyscf import scf
+import pyscf.dft
+import pyscf.lib
+import pyscf.mp
+from pyscf import dftd3
+from pyscf import __version__ as pyscf_version
+import findiff
+import matplotlib.pyplot as plt
+
+try:
+    import cclib
+    has_cclib = True
+except:
+    has_cclib = False
+
+# Specifying system.
+atoms = ['H']
+dimer_sep = None  # `None` if a single atom, float if dimer (in Angstroms).
+charge = -2
+multiplicity = 2
+scf_conv_tol = 1e-09  # Default: 1e-9
+scf_conv_tol_grad = 1e-06  # Default: 3.162e-6
+cc_conv_tol = 1e-07  # Default: 1e-7
+cc_conv_tol_normt = 1e-05  # Default: 1e-5
+force_unrestrict_spin = False
+broken_symmetry = False
+
+scf_diis_space = 16  # Default: 8
+cc_diis_space = 12  # Default: 6
+try_soscf_if_fail = True  # Tries to converge using the SOSCF method.
+try_diff_guess_if_fail = '1e'  # Tries a different initial guess algorithm. Options are: 1e, atom, huckel. None if not desired.
+try_easier_state_if_fail = None  # Preliminary calc in ground state. (chrg, mult) or None. Same basis set
+try_small_basis_if_fail = True  # Preliminary calculation with a smaller basis set.
+smaller_basis = 'aug-cc-pVDZ'
+scf_conv_tol_prelim = 1e-06  # Default: 1e-9
+scf_conv_tol_grad_prelim = 0.001  # Default: 3.162e-6
+diis_damp_prelim = 0.5
+
+# Specifying alchemical parts.
+max_apdft_order = 4
+lambda_step = 0.25
+lambda_limits = (0, 4)
+specific_atom_lambda = None
+
+finite_diff_accuracy = 2  # 2, 4, 6
+finite_diff_delta = 0.01
+
+# Specifying calculation.
+qc_method = 'CCSD(T)'
+basis_set = 'aug-cc-pVDZ'
+n_cores = 4  # Number of cores used on SMP (used for max memory).
+
+
+
+
+
+#####     NO CHANGES NEEDED BELOW     #####
+
+
+# Setting up paths.
+work_dir = str(pathlib.Path(__file__).parent.resolve())
+if work_dir[-1] == '/': work_dir = work_dir[:-1]  # Ensures path does NOT end in '/'
+
+_element_to_z = {
+    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9,
+    'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15, 'S': 16,
+    'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22, 'V': 23,
+    'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29, 'Zn': 30,
+    'Ga': 31,'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36, 'Rb': 37,
+    'Sr': 38, 'Y': 39, 'Zr': 40, 'Nb': 41, 'Mo': 42, 'Tc': 43, 'Ru': 44,
+    'Rh': 45, 'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50, 'Sb': 51,
+    'Te': 52, 'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Ce': 58,
+    'Pr': 59, 'Nd': 60, 'Pm': 61, 'Sm': 62, 'Eu': 63, 'Gd': 64, 'Tb': 65,
+    'Dy': 66, 'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70, 'Lu': 71, 'Hf': 72,
+    'Ta': 73, 'W': 74, 'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78, 'Au': 79,
+    'Hg': 80, 'Tl': 81, 'Pb': 82, 'Bi': 83, 'Po': 84, 'At': 85, 'Rn': 86,
+    'Fr': 87, 'Ra': 88, 'Ac': 89, 'Th': 90, 'Pa': 91, 'U': 92, 'Np': 93,
+    'Pu': 94, 'Am': 95, 'Cm': 96, 'Bk': 97, 'Cf': 98, 'Es': 99, 'Fm': 100,
+    'Md': 101, 'No': 102, 'Lr': 103, 'Rf': 104, 'Db': 105, 'Sg': 106,
+    'Bh': 107, 'Hs': 108, 'Mt': 109, 'Ds': 110, 'Rg': 111, 'Cn': 112,
+    'Uuq': 114, 'Uuh': 116,
+}
+
+def atoms_by_number(atom_list):
+    return [_element_to_z[i] for i in atom_list]
+
+qc_method_lower = qc_method.lower()
+atomic_numbers = atoms_by_number(atoms)
+if multiplicity > 1 or broken_symmetry or force_unrestrict_spin:
+    qc_method_label = 'U' + qc_method
+else:
+    qc_method_label = qc_method
+
+# Plot colors
+ref_color = 'dimgrey'
+
+def get_sys_label(atoms, charge, multiplicity, dimer_sep=None):
+    atoms_label = '.'.join([i.lower() for i in atoms])
+    if len(atoms) == 2:
+        assert dimer_sep is not None
+        return f'{atoms_label}.chrg{charge}.mult{multiplicity}.sep{dimer_sep:.2f}'
+    elif len(atoms) == 1:
+        return f'{atoms_label}.chrg{charge}.mult{multiplicity}'
+
+def get_calc_label(sys_label, qc_method, basis_set):
+    pattern = re.compile('[\W_]+')
+    qc_method_label = pattern.sub('', qc_method.lower())
+    basis_set_label = pattern.sub('', basis_set.lower())
+    return f'{sys_label}-pyscf-{qc_method_label}.{basis_set_label}'
+
+# Prepares molecular structures.
+mol = pyscf.gto.Mole()
+
+## Atomic coordinates in units of Angstrom.
+mol.unit = 'angstrom'  # Insures Angstroms are enforced.
+coords = np.array([np.zeros(3)])
+mol.atom = [[atoms[0], coords[0]]]
+if len(atoms) == 2:
+    assert dimer_sep is not None
+    coords = np.vstack((coords, np.array([dimer_sep, 0, 0])))
+    mol.atom.extend([[atoms[1], coords[1]]])
+elif len(atoms) == 1:
+    assert dimer_sep is None
+
+mol.charge = charge
+mol.multiplicity = multiplicity
+if basis_set == 'aug-cc-pV5Z':
+    # Was not available for all elements of interest.
+    import urllib
+    from bs4 import BeautifulSoup
+    bsse_url = 'https://www.basissetexchange.org/api/basis'
+    augcc_url = f'{bsse_url}/aug-cc-pv5z/format/nwchem/?version=1&elements='
+    augcc_url += ','.join([str(z) for z in atomic_numbers])
+    soup = BeautifulSoup(urllib.request.urlopen(augcc_url), 'html.parser')
+    basis_set_string = soup.get_text()
+    mol.basis = pyscf.gto.basis.parse(basis_set_string)
+else:
+    mol.basis = basis_set
+
+# Handles cores and memory.
+os.environ['OMP_NUM_THREADS'] = f'{n_cores}'  # For CRC jobs only.
+mol.max_memory = 8000 * n_cores
+
+# Handles calculation logging.
+mol.verbose = 4  # Controls print level; 4 is recommended.
+system_label = get_sys_label(atoms, charge, multiplicity, dimer_sep=dimer_sep)
+calc_label = get_calc_label(system_label, qc_method_label, basis_set)
+mol.output = f'{work_dir}/{calc_label}.log'  # Sets the output file.
+
+# Builds the molecular structure. (Must go after everything else).
+mol.build()
+
+def get_lambda_atom_values(atomic_numbers, lambda_value, specific_atom=specific_atom_lambda):
+    if len(atomic_numbers) == 1:
+        return np.array([lambda_value])
+    elif len(atomic_numbers) == 2:
+        if specific_atom is not None:
+            lambda_values = np.zeros(len(atomic_numbers))
+            lambda_values[specific_atom] = lambda_value
+        else:
+            if atomic_numbers[0] == atomic_numbers[1]:
+                lambda_values = np.array([-lambda_value, lambda_value])
+            else:
+                i_max = np.argmax(atomic_numbers)
+                i_min = np.argmin(atomic_numbers)
+                lambda_values = np.zeros((2,))
+                lambda_values[i_max] = lambda_value
+                lambda_values[i_min] = -lambda_value
+    else:
+        raise ValueError(f'Only one or two atoms are supported. There are {len(atomic_numbers)} in this system.')
+    return lambda_values
+
+
+def set_Z(calc, mol, deltaZ):
+    mf = pyscf.qmmm.add_mm_charges(calc, mol.atom_coords(unit='angstrom'), deltaZ)
+
+    # AM: Not quite sure what this does?
+    def energy_nuc(self):
+        q = mol.atom_charges().astype(float)
+        q += deltaZ
+        return mol.energy_nuc(q)
+    mf.energy_nuc = energy_nuc.__get__(mf, mf.__class__)
+
+    return mf
+
+def _get_hf_calc(l_val):
+    if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+        calc = scf.UHF(mol)
+    else:
+        calc = scf.RHF(mol)
+    
+    calc.chkfile = None
+    calc = set_Z(calc, mol, l_val)
+
+    calc.max_cycle = 200  # Default: 50
+    calc.conv_tol = scf_conv_tol
+    calc.conv_tol_grad = scf_conv_tol_grad
+    calc.diis_space = scf_diis_space
+
+def get_energy(
+    qc_method, l_val, broken_symmetry=broken_symmetry,
+    force_unrestrict_spin=force_unrestrict_spin
+):
+    calc_results = dict()
+
+    global multiplicity
+
+    if isinstance(l_val, float) or isinstance(l_val, int):
+        l_val = np.array(l_val)
+    
+    if qc_method in ['hf', 'ccsd', 'ccsd(t)']:
+        if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+            calc = scf.UHF(mol)
+        else:
+            calc = scf.RHF(mol)
+        
+        calc.chkfile = None
+        calc = set_Z(calc, mol, l_val)
+
+        calc.max_cycle = 200  # Default: 50
+        calc.conv_tol = scf_conv_tol
+        calc.conv_tol_grad = scf_conv_tol_grad
+        calc.diis_space = scf_diis_space
+        
+        if broken_symmetry:
+            calc.kernel(init_guess_breaksym=broken_symmetry)
+        else:
+            calc.kernel()
+        
+        # Attempts to converge SCF.
+        if not calc.converged and try_soscf_if_fail:
+            calc.newton()
+            if broken_symmetry:
+                calc.kernel(init_guess_breaksym=broken_symmetry)
+            else:
+                calc.kernel()
+        
+        if not calc.converged and try_diff_guess_if_fail is not None:
+            # Ensures we are using DIIS.
+            calc.diis = scf.CDIIS
+            calc.diis_space = scf_diis_space
+            calc.init_guess = try_diff_guess_if_fail
+            if broken_symmetry:
+                calc.kernel(init_guess_breaksym=broken_symmetry)
+            else:
+                calc.kernel()
+            calc.init_guess = 'minao'  # Set back to default.
+        
+        if not calc.converged and try_small_basis_if_fail:
+            import copy
+            mol_smaller = copy.copy(mol)
+            mol_smaller.basis = smaller_basis
+            mol_smaller.build()
+
+            if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+                calc_prelim = scf.UHF(mol_smaller)
+            else:
+                calc_prelim = scf.RHF(mol_smaller)
+            calc_prelim = set_Z(calc_prelim, mol_smaller, l_val)
+            calc_prelim.max_cycle = 200  # Default: 50
+            calc_prelim.conv_tol = scf_conv_tol_prelim
+            calc_prelim.conv_tol_grad = scf_conv_tol_grad_prelim
+            calc_prelim.diis_space = scf_diis_space
+            calc_prelim.chkfile = './prelim-calc.chk'
+            calc_prelim.damp = diis_damp_prelim
+            if broken_symmetry:
+                calc_prelim.kernel(init_guess_breaksym=broken_symmetry)
+            else:
+                calc_prelim.kernel()
+            if calc_prelim.converged:
+                get_dm = scf.hf.SCF(mol)
+                get_dm = set_Z(get_dm, mol, l_val)
+                get_dm.conv_tol = scf_conv_tol
+                get_dm.conv_tol_grad = scf_conv_tol_grad
+                get_dm.diis_space = scf_diis_space
+                get_dm.max_cycle = 200  # Default: 50
+                dm = get_dm.from_chk('./prelim-calc.chk')
+
+                # Creates new calculation.
+                if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+                    calc = scf.UHF(mol)
+                else:
+                    calc = scf.RHF(mol)
+                calc.chkfile = None
+                calc = set_Z(calc, mol, l_val)
+                calc.max_cycle = 200  # Default: 50
+                calc.conv_tol = scf_conv_tol
+                calc.conv_tol_grad = scf_conv_tol_grad
+                calc.diis_space = scf_diis_space
+                calc.damp = diis_damp_prelim
+                calc.kernel(dm)
+            
+            if not calc.converged and try_easier_state_if_fail is not None:
+                import copy
+                mol_easier = copy.copy(mol)
+                mol_easier.charge = try_easier_state_if_fail[0]
+                mol_easier.multiplicity = try_easier_state_if_fail[1]
+                mol_easier.build()
+
+                if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+                    calc_prelim = scf.UHF(mol_easier)
+                else:
+                    calc_prelim = scf.RHF(mol_easier)
+                calc_prelim = set_Z(calc_prelim, mol_easier, l_val)
+                calc_prelim.max_cycle = 200  # Default: 50
+                calc_prelim.conv_tol = scf_conv_tol_prelim
+                calc_prelim.conv_tol_grad = scf_conv_tol_grad_prelim
+                calc_prelim.diis_space = scf_diis_space
+                calc_prelim.chkfile = './prelim-calc.chk'
+                calc_prelim.damp = diis_damp_prelim
+                if broken_symmetry:
+                    calc_prelim.kernel(init_guess_breaksym=broken_symmetry)
+                else:
+                    calc_prelim.kernel()
+                if calc_prelim.converged:
+                    # Creates new calculation.
+                    if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+                        calc = scf.UHF(mol)
+                    else:
+                        calc = scf.RHF(mol)
+                    calc.chkfile = None
+                    calc = set_Z(calc, mol, l_val)
+                    calc.max_cycle = 200  # Default: 50
+                    calc.conv_tol = scf_conv_tol
+                    calc.conv_tol_grad = scf_conv_tol_grad
+                    calc.diis_space = scf_diis_space
+                    calc.damp = diis_damp_prelim
+                    calc.chkfile = './prelim-calc.chk'
+                    calc.init_guess = 'chkfile'
+                    calc.kernel()
+        
+        calc_results['hf_energy'] = calc.e_tot
+        calc_results['scf_converged'] = calc.converged
+
+        calc.analyze(with_meta_lowdin=True)  # SCF analysis
+        
+        # Selects the appropriate method and final energies.
+        if qc_method == 'hf':
+            calc_results['correlation_energy'] = 0.0
+        elif qc_method in ['ccsd', 'ccsd(t)']:
+            cc_calc = pyscf.cc.CCSD(calc)
+
+            cc_calc.max_cycle = 200
+            cc_calc.conv_tol = cc_conv_tol
+            cc_calc.conv_tol_normt = cc_conv_tol_normt
+            cc_calc.diis_space = cc_diis_space
+
+            # Runs calculation.
+            try:
+                cc_calc.kernel()
+            except np.linalg.LinAlgError:
+                calc_results['cc_converged'] = False
+            except:
+                calc_results['cc_converged'] = False
+            else:
+                calc_results['cc_converged'] = cc_calc.converged
+            
+            try:
+                calc_results['correlation_energy'] = cc_calc.e_corr
+            except:
+                pass
+            
+            if multiplicity == 1 and not broken_symmetry and not force_unrestrict_spin:
+                calc_results['t1_diagnostic'] = cc_calc.get_t1_diagnostic()
+
+            if qc_method == 'ccsd(t)':
+                if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+                    e_triples = cc_calc.uccsd_t()
+                else:
+                    e_triples = cc_calc.ccsd_t()
+                
+                calc_results['triples_correction'] = e_triples
+                calc_results['correlation_energy'] += e_triples
+        
+        calc_results['electronic_energy'] = np.nansum(
+            np.array(
+                [calc_results['hf_energy'], calc_results['correlation_energy']]
+            )
+        )
+    else:
+        # Assume DFT
+        if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+            calc = pyscf.dft.UKS(mol)
+        else:
+            calc = pyscf.dft.RKS(mol)
+
+        calc.grids.level = 5
+        calc = set_Z(calc, mol, l_val)
+        if qc_method == 'pbe':
+            calc.xc = 'pbe,pbe'
+        elif qc_method == 'pbe0':
+            calc.xc = 'pbe0,pbe0'
+        
+        calc.max_cycle = 300
+        calc.conv_tol = scf_conv_tol
+        calc.conv_tol_grad = scf_conv_tol_grad
+        
+        if broken_symmetry:
+            raise ValueError('Broken symmetry is not allowed for DFT.')
+        else:
+            e_elec = calc.kernel()
+
+        calc_results['scf_converged'] = calc.converged
+        calc.analyze(with_meta_lowdin=True)  # SCF analysis
+
+        # Gets dispersion corrections
+        d3_calc = dftd3.dftd3(calc)
+        calc_results['electronic_energy'] = d3_calc.kernel()
+        calc_results['dispersion_energy'] = calc_results['electronic_energy'] - e_elec
+    
+    # Post calculation analysis.
+    if multiplicity != 1 or broken_symmetry or force_unrestrict_spin:
+        calc_results['scf_spin_squared'], _ = calc.spin_square()
+        if qc_method in ['ccsd', 'ccsd(t)']:
+            if calc_results['cc_converged']:
+                calc_results['cc_spin_squared'], _ = cc_calc.spin_square()
+            else:
+                calc_results['cc_spin_squared'] = np.nan
+
+    return calc_results
+
+def get_qc_data(qc_method, lambda_atom_values):
+    qc_method = qc_method.lower()
+    # Initializes everything.
+    data = dict()
+    total_energies = []
+    if qc_method in ['hf', 'ccsd', 'ccsd(t)']:
+        hf_energies = []
+    else:
+        dispersion_energies = []
+    if qc_method == 'ccsd(t)':
+        triples_corrections = []
+    scf_converged = []
+    cc_converged = []
+    scf_spin_squared = []
+    cc_spin_squared = []
+    t1_diagnostic = []
+    
+    # Calculates everything.
+    for val in lambda_atom_values:
+        calc_results = get_energy(qc_method, val)
+        total_energies.append(calc_results['electronic_energy'])
+        if qc_method in ['hf', 'ccsd', 'ccsd(t)']:
+            hf_energies.append(calc_results['hf_energy'])
+        else:
+            dispersion_energies.append(calc_results['dispersion_energy'])
+        
+        if 'scf_converged' in calc_results.keys():
+            scf_converged.append(calc_results['scf_converged'])
+        
+        if 'cc_converged' in calc_results.keys():
+            cc_converged.append(calc_results['cc_converged'])
+
+        if 'triples_correction' in calc_results.keys():
+            triples_corrections.append(calc_results['triples_correction'])
+
+        if 'scf_spin_squared' in calc_results.keys():
+            scf_spin_squared.append(calc_results['scf_spin_squared'])
+        if 'cc_spin_squared' in calc_results.keys():
+            cc_spin_squared.append(calc_results['cc_spin_squared'])
+        
+        if 't1_diagnostic' in calc_results.keys():
+            t1_diagnostic.append(calc_results['t1_diagnostic'])
+    
+    # Stores everything.
+    data['total_energies'] = np.array(total_energies)
+    if qc_method in ['hf', 'ccsd', 'ccsd(t)']:
+        data['hf_energies'] = np.array(hf_energies)
+        if qc_method in ['ccsd', 'ccsd(t)']:
+            if qc_method == 'ccsd(t)':
+                data['triples_corrections'] = np.array(triples_corrections)
+    else:
+        data['dispersion_energies'] = np.array(dispersion_energies)
+    
+    if len(scf_converged) != 0:
+        data['scf_converged'] = np.array(scf_converged)
+    if len(cc_converged) != 0:
+        data['cc_converged'] = np.array(cc_converged)
+    if len(scf_spin_squared) != 0:
+        data['scf_spin_squared'] = np.array(scf_spin_squared)
+    if len(cc_spin_squared) != 0:
+        data['cc_spin_squared'] = np.array(cc_spin_squared)
+    if len(t1_diagnostic) != 0:
+        data['t1_diagnostic'] = np.array(t1_diagnostic)
+        
+    return data
+
+# Calculates electronic energies at all lambdas.
+lambda_values = np.arange(min(lambda_limits), max(lambda_limits) + lambda_step, lambda_step)
+lambda_atom_values = np.array([get_lambda_atom_values(atomic_numbers, l_val) for l_val in lambda_values])
+lambda_qc_data = get_qc_data(qc_method_lower, lambda_atom_values)
+
+# Prepares to do APDFT finite differences.
+# Gets a stencil (framework) for computing finite differences of different orders.
+def get_stencil():
+    stencil = [{'coefficients': np.array([1]), "offsets": np.array([0])}]  # 0th order approximation.
+    for order in range(1, max_apdft_order+1):
+        stencil.append(findiff.coefficients(deriv=order, acc=finite_diff_accuracy)['center'])
+    return stencil
+s = get_stencil()
+
+# Gets all the unique offsets for all APDFT orders in `positions`.
+positions = list(set().union(*[set(_["offsets"]) for _ in s]))
+lambdas_fd = [_*finite_diff_delta for _ in positions]
+lambdas_fd_atom_values = np.array([get_lambda_atom_values(atomic_numbers, l_val) for l_val in lambdas_fd])
+
+# Calculates energies for finite differences.
+fd_qc_data = get_qc_data(qc_method, lambdas_fd_atom_values)
+
+# Computes polynomial coefficients.
+poly_coeffs = []
+for order, stencil in enumerate(s):
+    contribution = 0
+    for o, c in zip(stencil["offsets"], stencil["coefficients"]):
+        contribution += fd_qc_data['total_energies'][lambdas_fd.index(o*finite_diff_delta)] * c
+    contribution /= finite_diff_delta ** order
+    contribution /= np.math.factorial(order)
+    poly_coeffs.append(contribution)
+
+# Making APDFT predictions
+def apdft_pred(poly_coeffs, order, lambda_values):
+    return np.polyval(poly_coeffs[:order+1][::-1], lambda_values)
+
+lambda_apdft_energies = []
+for order in range(0, max_apdft_order+1):
+    lambda_apdft_energies.append(apdft_pred(poly_coeffs, order, lambda_values))
+
+# Plotting predictions.
+plt.plot(lambda_values, lambda_qc_data['total_energies'], label=f'{qc_method_label}/{basis_set}', color=ref_color)
+for order in range(0, max_apdft_order+1):
+    plt.plot(
+        lambda_values,
+        lambda_apdft_energies[order],  # APDFT predictions
+        label=f"APDFT{order}",
+        marker='o',
+        markeredgewidth=0,
+        alpha=1.0,
+        linestyle=''
+    )
+plt.legend()
+plt.xlabel('$\lambda$')
+plt.ylabel('Energy (Eh)')
+plt.ylim(min(lambda_qc_data['total_energies'])-1, max(lambda_qc_data['total_energies'])+1)
+plt.savefig(f'{work_dir}/{calc_label}-qc.apdft.energies.png', dpi=1000)
+plt.close()
+
+# Plotting error.
+for order in range(0, max_apdft_order+1):
+    plt.plot(
+        lambda_values,
+        lambda_apdft_energies[order] - lambda_qc_data['total_energies'],
+        label=f"APDFT{order}",
+        marker='o',
+    )
+plt.legend()
+plt.ylabel("Error [Eh]")
+plt.xlabel("$\lambda$")
+plt.ylim(-1, 1)
+plt.savefig(f'{work_dir}/{calc_label}-apdft.error.png', dpi=1000)
+plt.close()
+
+
+# JSON file.
+
+# Merging QC data
+
+assert lambdas_fd[0] == 0.0
+all_lambdas = np.hstack((lambda_values, lambdas_fd[1:]))  # Trims first one (which is zero).
+sort_i = np.argsort(all_lambdas)
+all_lambdas = np.take_along_axis(all_lambdas, sort_i, axis=0)
+
+all_total_energies = np.take_along_axis(np.hstack((lambda_qc_data['total_energies'], fd_qc_data['total_energies'][1:])), sort_i, axis=0)
+if qc_method_lower in ['hf', 'ccsd', 'ccsd(t)']:
+    all_hf_energies = np.take_along_axis(np.hstack((lambda_qc_data['hf_energies'], fd_qc_data['hf_energies'][1:])), sort_i, axis=0)
+else:
+    all_dispersion_energies = np.take_along_axis(np.hstack((lambda_qc_data['dispersion_energies'], fd_qc_data['dispersion_energies'][1:])), sort_i, axis=0)
+
+apdft_energies = dict()
+for order in range(0, max_apdft_order+1):
+    apdft_energies[str(order)] = apdft_pred(poly_coeffs, order, all_lambdas)
+
+
+json_dict = {
+    'schema_name': 'pyscf_apdft_output',
+    'provenance': {
+        'creator': 'PySCF',
+        'version': pyscf_version
+    },
+    'molecule': {
+        'geometry': coords,
+        'symbols': atoms
+    },
+    'molecular_charge': charge,
+    'molecular_multiplicity': multiplicity,
+    'name': calc_label,
+    'atomic_numbers': atomic_numbers,
+    'n_electrons': mol.nelectron,
+    'model': {
+        'method': qc_method_label,
+        'basis': basis_set,
+        'scf_conv_tol': scf_conv_tol,
+        'scf_conv_tol_grad': scf_conv_tol_grad,
+    },
+    'broken_symmetry': broken_symmetry,
+    'finite_diff_delta': finite_diff_delta,
+    'finite_diff_acc': finite_diff_accuracy,
+    'apdft_lambdas': all_lambdas,
+    'electronic_energies': all_total_energies,
+    'apdft_energies': apdft_energies,
+    'apdft_poly_coeff': poly_coeffs
+}
+
+if qc_method_lower in ['ccsd', 'ccsd(t)']:
+    json_dict['hf_energies'] = all_hf_energies
+    json_dict['model']['cc_conv_tol'] = cc_conv_tol_normt
+    json_dict['model']['cc_conv_tol_normt'] = cc_conv_tol
+elif qc_method_lower not in ['hf', 'ccsd', 'ccsd(t)']:
+    json_dict['dispersion_energies'] = all_dispersion_energies
+
+if qc_method_lower == 'ccsd(t)':
+    try:
+        json_dict['triples_corrections'] = np.take_along_axis(
+            np.hstack((lambda_qc_data['triples_corrections'], fd_qc_data['triples_corrections'][1:])),
+            sort_i, axis=0
+        )
+    except:
+        pass
+
+if 'scf_converged' in lambda_qc_data.keys() and 'scf_converged' in fd_qc_data.keys():
+    json_dict['scf_converged'] = np.take_along_axis(np.hstack((lambda_qc_data['scf_converged'], fd_qc_data['scf_converged'][1:])), sort_i, axis=0)
+if 'cc_converged' in lambda_qc_data.keys() and 'cc_converged' in fd_qc_data.keys():
+    json_dict['cc_converged'] = np.take_along_axis(np.hstack((lambda_qc_data['cc_converged'], fd_qc_data['cc_converged'][1:])), sort_i, axis=0)
+if 'scf_spin_squared' in lambda_qc_data.keys() and 'scf_spin_squared' in fd_qc_data.keys():
+    json_dict['scf_spin_squared'] = np.take_along_axis(np.hstack((lambda_qc_data['scf_spin_squared'], fd_qc_data['scf_spin_squared'][1:])), sort_i, axis=0)
+if 'cc_spin_squared' in lambda_qc_data.keys() and 'cc_spin_squared' in fd_qc_data.keys():
+    json_dict['cc_spin_squared'] = np.take_along_axis(np.hstack((lambda_qc_data['cc_spin_squared'], fd_qc_data['cc_spin_squared'][1:])), sort_i, axis=0)
+try:
+    if 't1_diagnostic' in lambda_qc_data.keys():
+        json_dict['t1_diagnostic'] = np.take_along_axis(np.hstack((lambda_qc_data['t1_diagnostic'], fd_qc_data['t1_diagnostic'][1:])), sort_i, axis=0)
+except:
+    pass
+
+if has_cclib:
+    json_string = json.dumps(
+        json_dict, cls=cclib.io.cjsonwriter.JSONIndentEncoder,
+        sort_keys=True, indent=4
+    )
+else:
+    json_string = json.dumps(
+        json_dict,
+        sort_keys=True
+    )
+
+with open(f'{work_dir}/{calc_label}.json', 'w') as f:
+    f.write(json_string)
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='smp-n67.crc.pitt.edu', release='3.10.0-1160.15.2.el7.x86_64', version='#1 SMP Thu Jan 21 16:15:07 EST 2021', machine='x86_64', processor='x86_64')  Threads 4
+Python 3.7.0 (default, Jun 28 2018, 13:15:42) 
+[GCC 7.2.0]
+numpy 1.21.2  scipy 1.7.1
+Date: Wed Nov  3 12:59:44 2021
+PySCF version 1.7.6
+PySCF path  /ihome/jkeith/amm503/.local/lib/python3.7/site-packages/pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 3
+[INPUT] charge = -2
+[INPUT] spin (= nelec alpha-beta = 2S) = 1
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT]  1 H      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr
+
+nuclear repulsion = 0
+number of shells = 5
+number of NR pGTOs = 11
+number of NR cGTOs = 9
+basis = aug-cc-pVDZ
+ecp = {}
+CPU time:         1.79
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 132 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+Overwritten attributes  energy_nuc  of <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'>
+init E= -0.324994918064823
+  alpha nocc = 2  HOMO = 0.085668319491656  LUMO = 0.310428168955641
+  beta  nocc = 1  HOMO = -0.184578152068417  LUMO = 0.085668319491656
+
+WARN: system HOMO 0.085668319491656 >= system LUMO 0.085668319491656
+
+cycle= 1 E= -0.163651356011079  delta_E= 0.161  |g|= 0.148  |ddm|= 2.57
+  alpha nocc = 2  HOMO = 0.312304493217549  LUMO = 0.807238006470106
+  beta  nocc = 1  HOMO = 0.229414592528307  LUMO = 0.460286419508782
+cycle= 2 E= -0.210468395638365  delta_E= -0.0468  |g|= 0.0504  |ddm|= 0.592
+  alpha nocc = 2  HOMO = 0.270440431319113  LUMO = 0.747721918340381
+  beta  nocc = 1  HOMO = 0.174435793564143  LUMO = 0.478428675125981
+cycle= 3 E= -0.223532127472487  delta_E= -0.0131  |g|= 0.0424  |ddm|= 0.292
+  alpha nocc = 2  HOMO = 0.239201722961595  LUMO = 0.677332116784151
+  beta  nocc = 1  HOMO = 0.158629213437409  LUMO = 0.547999670480861
+cycle= 4 E= -0.235448510627966  delta_E= -0.0119  |g|= 0.0168  |ddm|= 0.911
+  alpha nocc = 2  HOMO = 0.244699854077606  LUMO = 0.695869919569098
+  beta  nocc = 1  HOMO = 0.1831664970432  LUMO = 0.516717802319124
+cycle= 5 E= -0.236026581566384  delta_E= -0.000578  |g|= 0.00275  |ddm|= 0.136
+  alpha nocc = 2  HOMO = 0.244465360222164  LUMO = 0.695325784712295
+  beta  nocc = 1  HOMO = 0.187083960782726  LUMO = 0.512585675898376
+cycle= 6 E= -0.236033985103193  delta_E= -7.4e-06  |g|= 0.0012  |ddm|= 0.0195
+  alpha nocc = 2  HOMO = 0.245056771695529  LUMO = 0.696847803640503
+  beta  nocc = 1  HOMO = 0.18918807572802  LUMO = 0.509660225802272
+cycle= 7 E= -0.236037145533213  delta_E= -3.16e-06  |g|= 0.00049  |ddm|= 0.0145
+  alpha nocc = 2  HOMO = 0.244865218337152  LUMO = 0.696353340115387
+  beta  nocc = 1  HOMO = 0.188246056303785  LUMO = 0.510895365307164
+cycle= 8 E= -0.236037565912539  delta_E= -4.2e-07  |g|= 0.000166  |ddm|= 0.00458
+  alpha nocc = 2  HOMO = 0.244902325820847  LUMO = 0.696450883910561
+  beta  nocc = 1  HOMO = 0.188456171523183  LUMO = 0.510628270923974
+cycle= 9 E= -0.236037612595384  delta_E= -4.67e-08  |g|= 2.8e-05  |ddm|= 0.000879
+  alpha nocc = 2  HOMO = 0.244905570256999  LUMO = 0.696459408259027
+  beta  nocc = 1  HOMO = 0.188474788236775  LUMO = 0.510604658178644
+cycle= 10 E= -0.23603761351789  delta_E= -9.23e-10  |g|= 1.58e-05  |ddm|= 7.68e-05
+  alpha nocc = 2  HOMO = 0.244906888289898  LUMO = 0.696462871195399
+  beta  nocc = 1  HOMO = 0.188482383021355  LUMO = 0.510595031977679
+cycle= 11 E= -0.236037613746149  delta_E= -2.28e-10  |g|= 1.09e-05  |ddm|= 3.12e-05
+  alpha nocc = 2  HOMO = 0.244907596784367  LUMO = 0.696464732696814
+  beta  nocc = 1  HOMO = 0.18848647744964  LUMO = 0.510589844917073
+cycle= 12 E= -0.23603761383376  delta_E= -8.76e-11  |g|= 8.19e-06  |ddm|= 1.68e-05
+  alpha nocc = 2  HOMO = 0.244908036070067  LUMO = 0.696465886907488
+  beta  nocc = 1  HOMO = 0.188489021914413  LUMO = 0.510586622669191
+cycle= 13 E= -0.236037613875732  delta_E= -4.2e-11  |g|= 6.53e-06  |ddm|= 1.04e-05
+  alpha nocc = 2  HOMO = 0.244908333316958  LUMO = 0.696466667949457
+  beta  nocc = 1  HOMO = 0.188490747209272  LUMO = 0.510584438561013
+cycle= 14 E= -0.236037613898763  delta_E= -2.3e-11  |g|= 5.4e-06  |ddm|= 7.04e-06
+  alpha nocc = 2  HOMO = 0.244908547578339  LUMO = 0.696467230925532
+  beta  nocc = 1  HOMO = 0.188491992279754  LUMO = 0.510582862665451
+cycle= 15 E= -0.236037613912668  delta_E= -1.39e-11  |g|= 4.59e-06  |ddm|= 5.07e-06
+  alpha nocc = 2  HOMO = 0.244908708482033  LUMO = 0.69646765372003
+  beta  nocc = 1  HOMO = 0.188492928772401  LUMO = 0.510581677657816
+cycle= 16 E= -0.236037613921627  delta_E= -8.96e-12  |g|= 3.98e-06  |ddm|= 3.81e-06
+  alpha nocc = 2  HOMO = 0.244908833556986  LUMO = 0.69646798237516
+  beta  nocc = 1  HOMO = 0.188493657628701  LUMO = 0.510580755572604
+cycle= 17 E= -0.23603761392771  delta_E= -6.08e-12  |g|= 3.5e-06  |ddm|= 2.96e-06
+  alpha nocc = 2  HOMO = 0.244909850905611  LUMO = 0.696470654229605
+  beta  nocc = 1  HOMO = 0.188499437403087  LUMO = 0.510573412418404
+cycle= 18 E= -0.236037613948469  delta_E= -2.08e-11  |g|= 2.92e-07  |ddm|= 2.41e-05
+  alpha nocc = 2  HOMO = 0.244909788276345  LUMO = 0.696470454749724
+  beta  nocc = 1  HOMO = 0.188499023312373  LUMO = 0.510573830767292
+Extra cycle  E= -0.236037613948593  delta_E= -1.24e-13  |g|= 1.43e-07  |ddm|= 8.83e-07
+converged SCF energy = -0.236037613948593  <S^2> = 0.75815028  2S+1 = 2.0081337
+**** SCF Summaries ****
+Total Energy =                          -0.236037613948593
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.872250565894897
+Two-electron Energy =                    0.636212951946304
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0332334213089228 | 0.188499023312373  occ= 1 | 1
+MO #2   energy= 0.244909788276345  | 0.510573830767292  occ= 1 | 0
+MO #3   energy= 0.696470454749724  | 0.712778541173705  occ= 0 | 0
+MO #4   energy= 0.696470454749724  | 0.712778541173706  occ= 0 | 0
+MO #5   energy= 0.696470454749724  | 0.712778541173706  occ= 0 | 0
+MO #6   energy= 1.1403480872562    | 1.29615926009568   occ= 0 | 0
+MO #7   energy= 2.21241653895727   | 2.3080559770789    occ= 0 | 0
+MO #8   energy= 2.21241653895727   | 2.3080559770789    occ= 0 | 0
+MO #9   energy= 2.21241653895727   | 2.3080559770789    occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.64807
+spin_pop of  0 H 2s        0.12745
+spin_pop of  0 H 3s        0.22448
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.98991 | 0.34184   
+pop of  0 H 2s        0.67281 | 0.54536   
+pop of  0 H 3s        0.33728 | 0.11280   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 155 MB)
+Init t2, MP2 energy = -0.00991993307305688
+Init E_corr(CCSD) = -0.00991993307308349
+cycle = 1  E_corr(CCSD) = -0.0127725195701604  dE = -0.0028525865  norm(t1,t2) = 0.0479738
+cycle = 2  E_corr(CCSD) = -0.0143408953481108  dE = -0.00156837578  norm(t1,t2) = 0.0356458
+cycle = 3  E_corr(CCSD) = -0.0178649671504911  dE = -0.0035240718  norm(t1,t2) = 0.0260984
+cycle = 4  E_corr(CCSD) = -0.0174864950909247  dE = 0.00037847206  norm(t1,t2) = 0.00278568
+cycle = 5  E_corr(CCSD) = -0.0175755008266581  dE = -8.90057357e-05  norm(t1,t2) = 0.000741969
+cycle = 6  E_corr(CCSD) = -0.017566033589018  dE = 9.46723764e-06  norm(t1,t2) = 8.78519e-05
+cycle = 7  E_corr(CCSD) = -0.0175650138905502  dE = 1.01969847e-06  norm(t1,t2) = 8.59351e-06
+cycle = 8  E_corr(CCSD) = -0.0175653298124992  dE = -3.15921949e-07  norm(t1,t2) = 3.50731e-06
+cycle = 9  E_corr(CCSD) = -0.0175653637451402  dE = -3.39326409e-08  norm(t1,t2) = 3.45182e-07
+UCCSD converged
+E(UCCSD) = -0.2536029776937333  E_corr = -0.01756536374514015
+UCCSD(T) correction = -1.9169827917088e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00988432
+cycle = 2  norm(lambda1,lambda2) = 0.00317011
+cycle = 3  norm(lambda1,lambda2) = 0.00114311
+cycle = 4  norm(lambda1,lambda2) = 0.000243238
+cycle = 5  norm(lambda1,lambda2) = 7.4064e-05
+cycle = 6  norm(lambda1,lambda2) = 9.00305e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 159 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.596011165195609
+  alpha nocc = 2  HOMO = 0.023270657168074  LUMO = 0.212253197796066
+  beta  nocc = 1  HOMO = -0.426429921183492  LUMO = 0.023270657168074
+
+WARN: system HOMO 0.023270657168074 >= system LUMO 0.023270657168074
+
+cycle= 1 E= -0.630698902543966  delta_E= -0.0347  |g|= 0.156  |ddm|= 2.14
+  alpha nocc = 2  HOMO = 0.232224183272026  LUMO = 0.74608597419406
+  beta  nocc = 1  HOMO = 0.103687534127391  LUMO = 0.383936713791925
+cycle= 2 E= -0.665127551730384  delta_E= -0.0344  |g|= 0.0279  |ddm|= 0.617
+  alpha nocc = 2  HOMO = 0.219290713171603  LUMO = 0.713276775427954
+  beta  nocc = 1  HOMO = 0.0466576181549645  LUMO = 0.385444663996316
+cycle= 3 E= -0.667728564844587  delta_E= -0.0026  |g|= 0.0176  |ddm|= 0.115
+  alpha nocc = 2  HOMO = 0.213876180046447  LUMO = 0.703034227711524
+  beta  nocc = 1  HOMO = 0.0659359101734252  LUMO = 0.39144909488326
+cycle= 4 E= -0.669727033068521  delta_E= -0.002  |g|= 0.00519  |ddm|= 0.211
+  alpha nocc = 2  HOMO = 0.21104873085723  LUMO = 0.699919537477378
+  beta  nocc = 1  HOMO = 0.0693332038696274  LUMO = 0.391790892753379
+cycle= 5 E= -0.669794951900296  delta_E= -6.79e-05  |g|= 0.000957  |ddm|= 0.0615
+  alpha nocc = 2  HOMO = 0.211927568245481  LUMO = 0.70155879040078
+  beta  nocc = 1  HOMO = 0.0699687404155183  LUMO = 0.391561205596098
+cycle= 6 E= -0.669801355857068  delta_E= -6.4e-06  |g|= 0.000121  |ddm|= 0.0143
+  alpha nocc = 2  HOMO = 0.211971861904202  LUMO = 0.701767332589248
+  beta  nocc = 1  HOMO = 0.0695811757099205  LUMO = 0.391761864400083
+cycle= 7 E= -0.669801400923467  delta_E= -4.51e-08  |g|= 2.82e-05  |ddm|= 0.00184
+  alpha nocc = 2  HOMO = 0.211948941839539  LUMO = 0.701678839241583
+  beta  nocc = 1  HOMO = 0.0696923115963752  LUMO = 0.391674881402202
+cycle= 8 E= -0.669801402501365  delta_E= -1.58e-09  |g|= 1.56e-05  |ddm|= 0.00049
+  alpha nocc = 2  HOMO = 0.21195751931858  LUMO = 0.701710605175882
+  beta  nocc = 1  HOMO = 0.0696523606051141  LUMO = 0.391705791270605
+cycle= 9 E= -0.669801403277162  delta_E= -7.76e-10  |g|= 4.31e-08  |ddm|= 0.000178
+  alpha nocc = 2  HOMO = 0.211957539315068  LUMO = 0.701710674012302
+  beta  nocc = 1  HOMO = 0.0696522723438226  LUMO = 0.391705882099657
+Extra cycle  E= -0.669801403277166  delta_E= -3.55e-15  |g|= 2.09e-08  |ddm|= 2.03e-07
+converged SCF energy = -0.669801403277166  <S^2> = 0.76041827  2S+1 = 2.0103913
+**** SCF Summaries ****
+Total Energy =                          -0.669801403277166
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -1.568561560674847
+Two-electron Energy =                    0.898760157397682
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0526510639784858 | 0.0696522723438226 occ= 1 | 1
+MO #2   energy= 0.211957539315068  | 0.391705882099657  occ= 1 | 0
+MO #3   energy= 0.701710674012302  | 0.700784612413722  occ= 0 | 0
+MO #4   energy= 0.701710674012303  | 0.700784612413722  occ= 0 | 0
+MO #5   energy= 0.701710674012303  | 0.700784612413722  occ= 0 | 0
+MO #6   energy= 1.06773543405171   | 1.14156617771257   occ= 0 | 0
+MO #7   energy= 2.24502372101013   | 2.29248688748827   occ= 0 | 0
+MO #8   energy= 2.24502372101013   | 2.29248688748827   occ= 0 | 0
+MO #9   energy= 2.24502372101013   | 2.29248688748827   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.14308
+spin_pop of  0 H 2s        0.54329
+spin_pop of  0 H 3s        0.31363
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.99890 | 0.85581   
+pop of  0 H 2s        0.67897 | 0.13568   
+pop of  0 H 3s        0.32213 | 0.00850   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 160 MB)
+Init t2, MP2 energy = -0.0231041391815637
+Init E_corr(CCSD) = -0.0231041391815646
+cycle = 1  E_corr(CCSD) = -0.029428917571956  dE = -0.00632477839  norm(t1,t2) = 0.037754
+cycle = 2  E_corr(CCSD) = -0.0314626143698001  dE = -0.0020336968  norm(t1,t2) = 0.0180134
+cycle = 3  E_corr(CCSD) = -0.0329538638356928  dE = -0.00149124947  norm(t1,t2) = 0.0100652
+cycle = 4  E_corr(CCSD) = -0.0328288334518586  dE = 0.000125030384  norm(t1,t2) = 0.00285672
+cycle = 5  E_corr(CCSD) = -0.0328513346578268  dE = -2.2501206e-05  norm(t1,t2) = 0.000603312
+cycle = 6  E_corr(CCSD) = -0.0328345783437386  dE = 1.67563141e-05  norm(t1,t2) = 0.000148174
+cycle = 7  E_corr(CCSD) = -0.0328363019526587  dE = -1.72360892e-06  norm(t1,t2) = 2.04604e-05
+cycle = 8  E_corr(CCSD) = -0.032836184826575  dE = 1.17126084e-07  norm(t1,t2) = 1.74335e-06
+cycle = 9  E_corr(CCSD) = -0.0328361696906434  dE = 1.51359316e-08  norm(t1,t2) = 1.9381e-07
+UCCSD converged
+E(UCCSD) = -0.7026375729678089  E_corr = -0.03283616969064335
+UCCSD(T) correction = -2.99100055669463e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00411011
+cycle = 2  norm(lambda1,lambda2) = 0.00118764
+cycle = 3  norm(lambda1,lambda2) = 0.000416718
+cycle = 4  norm(lambda1,lambda2) = 0.00011376
+cycle = 5  norm(lambda1,lambda2) = 3.4886e-05
+cycle = 6  norm(lambda1,lambda2) = 5.97732e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.867027412326395
+  alpha nocc = 2  HOMO = -0.0375962568310076  LUMO = 0.111893325202017
+  beta  nocc = 1  HOMO = -0.71626670707363  LUMO = -0.0375962568310076
+
+WARN: system HOMO -0.0375962568310076 >= system LUMO -0.0375962568310076
+
+cycle= 1 E= -1.20032266245386  delta_E= -0.333  |g|= 0.15  |ddm|= 1.82
+  alpha nocc = 2  HOMO = 0.171132130614961  LUMO = 0.675723726866419
+  beta  nocc = 1  HOMO = -0.0799592764880771  LUMO = 0.3279461821835
+cycle= 2 E= -1.23179660772211  delta_E= -0.0315  |g|= 0.0272  |ddm|= 0.731
+  alpha nocc = 2  HOMO = 0.164338800767313  LUMO = 0.652883888056565
+  beta  nocc = 1  HOMO = -0.142465579199708  LUMO = 0.324496340132444
+cycle= 3 E= -1.23297891486144  delta_E= -0.00118  |g|= 0.00429  |ddm|= 0.182
+  alpha nocc = 2  HOMO = 0.165525962843686  LUMO = 0.653115804553418
+  beta  nocc = 1  HOMO = -0.134921467853199  LUMO = 0.324309787955032
+cycle= 4 E= -1.23303008761906  delta_E= -5.12e-05  |g|= 0.00142  |ddm|= 0.021
+  alpha nocc = 2  HOMO = 0.164461830200316  LUMO = 0.653185621508393
+  beta  nocc = 1  HOMO = -0.136002615820041  LUMO = 0.324695051046891
+cycle= 5 E= -1.23303452977071  delta_E= -4.44e-06  |g|= 0.000269  |ddm|= 0.00972
+  alpha nocc = 2  HOMO = 0.164741499020032  LUMO = 0.653330000300938
+  beta  nocc = 1  HOMO = -0.134925064581287  LUMO = 0.324675769631268
+cycle= 6 E= -1.2330346811938  delta_E= -1.51e-07  |g|= 3.86e-05  |ddm|= 0.00186
+  alpha nocc = 2  HOMO = 0.16474874931125  LUMO = 0.653337345352259
+  beta  nocc = 1  HOMO = -0.134916123122983  LUMO = 0.324672109807488
+cycle= 7 E= -1.23303468420496  delta_E= -3.01e-09  |g|= 2.12e-07  |ddm|= 0.000266
+  alpha nocc = 2  HOMO = 0.164748676385556  LUMO = 0.653337477212114
+  beta  nocc = 1  HOMO = -0.134916181231951  LUMO = 0.324672167034016
+cycle= 8 E= -1.23303468420502  delta_E= -6.22e-14  |g|= 6.13e-08  |ddm|= 9.97e-07
+  alpha nocc = 2  HOMO = 0.164748646087712  LUMO = 0.653337532348488
+  beta  nocc = 1  HOMO = -0.134916192038975  LUMO = 0.324672191250146
+Extra cycle  E= -1.23303468420503  delta_E= -5.77e-15  |g|= 1.48e-08  |ddm|= 3.09e-07
+converged SCF energy = -1.23303468420503  <S^2> = 0.75102734  2S+1 = 2.0010271
+**** SCF Summaries ****
+Total Energy =                          -1.233034684205027
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -2.325514419912486
+Two-electron Energy =                    1.092479735707459
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.170387380111638 | -0.134916192038975 occ= 1 | 1
+MO #2   energy= 0.164748646087712  | 0.324672191250146  occ= 1 | 0
+MO #3   energy= 0.653337532348488  | 0.66057908323102   occ= 0 | 0
+MO #4   energy= 0.653337532348488  | 0.660579083231021  occ= 0 | 0
+MO #5   energy= 0.653337532348489  | 0.660579083231021  occ= 0 | 0
+MO #6   energy= 0.93958464942692   | 0.962146430021008  occ= 0 | 0
+MO #7   energy= 2.19022219225733   | 2.204812635918     occ= 0 | 0
+MO #8   energy= 2.19022219225733   | 2.204812635918     occ= 0 | 0
+MO #9   energy= 2.19022219225733   | 2.204812635918     occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s       -0.00061
+spin_pop of  0 H 2s        0.70939
+spin_pop of  0 H 3s        0.29122
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.99655 | 0.99716   
+pop of  0 H 2s        0.70999 | 0.00060   
+pop of  0 H 3s        0.29346 | 0.00224   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.0231964271516824
+Init E_corr(CCSD) = -0.0231964271516826
+cycle = 1  E_corr(CCSD) = -0.0288482776321634  dE = -0.00565185048  norm(t1,t2) = 0.0247687
+cycle = 2  E_corr(CCSD) = -0.0302930713434865  dE = -0.00144479371  norm(t1,t2) = 0.00798031
+cycle = 3  E_corr(CCSD) = -0.0309092641776896  dE = -0.000616192834  norm(t1,t2) = 0.00304142
+cycle = 4  E_corr(CCSD) = -0.0308753713613148  dE = 3.38928164e-05  norm(t1,t2) = 0.000566175
+cycle = 5  E_corr(CCSD) = -0.0308780487125374  dE = -2.67735122e-06  norm(t1,t2) = 0.000122858
+cycle = 6  E_corr(CCSD) = -0.030877665796654  dE = 3.82915883e-07  norm(t1,t2) = 1.57787e-05
+cycle = 7  E_corr(CCSD) = -0.0308777545856783  dE = -8.87890243e-08  norm(t1,t2) = 4.07875e-06
+UCCSD converged
+E(UCCSD) = -1.263912438790705  E_corr = -0.03087775458567829
+UCCSD(T) correction = -3.46172777888056e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00157652
+cycle = 2  norm(lambda1,lambda2) = 0.000445549
+cycle = 3  norm(lambda1,lambda2) = 0.000152184
+cycle = 4  norm(lambda1,lambda2) = 2.29276e-05
+cycle = 5  norm(lambda1,lambda2) = 5.32836e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -1.13804365945718
+  alpha nocc = 2  HOMO = -0.103379486173395  LUMO = 0.00866973806154941
+  beta  nocc = 1  HOMO = -1.04173323013358  LUMO = -0.103379486173395
+
+WARN: system HOMO -0.103379486173395 >= system LUMO -0.103379486173395
+
+cycle= 1 E= -1.85310550193918  delta_E= -0.715  |g|= 0.146  |ddm|=  1.7
+  alpha nocc = 2  HOMO = 0.121220927014004  LUMO = 0.600240289177182
+  beta  nocc = 1  HOMO = -0.313945308253284  LUMO = 0.280036919833958
+cycle= 2 E= -1.89039620466091  delta_E= -0.0373  |g|= 0.0346  |ddm|= 0.905
+  alpha nocc = 2  HOMO = 0.10995404876721  LUMO = 0.578487786299114
+  beta  nocc = 1  HOMO = -0.384946208085234  LUMO = 0.272472985236317
+cycle= 3 E= -1.89262925276352  delta_E= -0.00223  |g|= 0.00195  |ddm|= 0.315
+  alpha nocc = 2  HOMO = 0.112738178312403  LUMO = 0.579179015377102
+  beta  nocc = 1  HOMO = -0.381872057116576  LUMO = 0.272339281464708
+cycle= 4 E= -1.89263679213235  delta_E= -7.54e-06  |g|= 0.00029  |ddm|= 0.0195
+  alpha nocc = 2  HOMO = 0.112365089192074  LUMO = 0.579007066314449
+  beta  nocc = 1  HOMO = -0.382609308774585  LUMO = 0.272290706563527
+cycle= 5 E= -1.89263689928053  delta_E= -1.07e-07  |g|= 0.000174  |ddm|= 0.000821
+  alpha nocc = 2  HOMO = 0.11214725066378  LUMO = 0.578882811824939
+  beta  nocc = 1  HOMO = -0.383177151502374  LUMO = 0.272257986678861
+cycle= 6 E= -1.89263695665151  delta_E= -5.74e-08  |g|= 4.72e-06  |ddm|= 0.000951
+  alpha nocc = 2  HOMO = 0.112144226826777  LUMO = 0.57888085411946
+  beta  nocc = 1  HOMO = -0.383185132437932  LUMO = 0.272257546971465
+cycle= 7 E= -1.89263695668594  delta_E= -3.44e-11  |g|= 6.91e-08  |ddm|= 2.48e-05
+  alpha nocc = 2  HOMO = 0.112144089547502  LUMO = 0.578880786141499
+  beta  nocc = 1  HOMO = -0.383185290676762  LUMO = 0.272257522313162
+Extra cycle  E= -1.89263695668595  delta_E= -5.55e-15  |g|= 2.1e-08  |ddm|= 1.65e-07
+converged SCF energy = -1.89263695668595  <S^2> = 0.75014048  2S+1 = 2.0001405
+**** SCF Summaries ****
+Total Energy =                          -1.892636956685946
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -3.116308741091323
+Two-electron Energy =                    1.223671784405377
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.397924005610056 | -0.383185290676762 occ= 1 | 1
+MO #2   energy= 0.112144089547502  | 0.272257522313162  occ= 1 | 0
+MO #3   energy= 0.578880786141499  | 0.59176777137332   occ= 0 | 0
+MO #4   energy= 0.578880786141499  | 0.59176777137332   occ= 0 | 0
+MO #5   energy= 0.578880786141499  | 0.59176777137332   occ= 0 | 0
+MO #6   energy= 0.780239919512702  | 0.795117879021413  occ= 0 | 0
+MO #7   energy= 2.05599352997354   | 2.06343609185746   occ= 0 | 0
+MO #8   energy= 2.05599352997354   | 2.06343609185746   occ= 0 | 0
+MO #9   energy= 2.05599352997354   | 2.06343609185746   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.00114
+spin_pop of  0 H 2s        0.74858
+spin_pop of  0 H 3s        0.25028
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.96747 | 0.96633   
+pop of  0 H 2s        0.76990 | 0.02133   
+pop of  0 H 3s        0.26262 | 0.01234   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.0199093165855765
+Init E_corr(CCSD) = -0.0199093165855769
+cycle = 1  E_corr(CCSD) = -0.024308731873616  dE = -0.00439941529  norm(t1,t2) = 0.0181295
+cycle = 2  E_corr(CCSD) = -0.0253192019267926  dE = -0.00101047005  norm(t1,t2) = 0.00528776
+cycle = 3  E_corr(CCSD) = -0.0256815815351796  dE = -0.000362379608  norm(t1,t2) = 0.00185665
+cycle = 4  E_corr(CCSD) = -0.0256568875117356  dE = 2.46940234e-05  norm(t1,t2) = 0.000327202
+cycle = 5  E_corr(CCSD) = -0.0256583890843933  dE = -1.50157266e-06  norm(t1,t2) = 5.01343e-05
+cycle = 6  E_corr(CCSD) = -0.0256583355494187  dE = 5.35349747e-08  norm(t1,t2) = 4.87858e-06
+UCCSD converged
+E(UCCSD) = -1.918295292235364  E_corr = -0.02565833554941865
+UCCSD(T) correction = -1.68143360865108e-05
+cycle = 1  norm(lambda1,lambda2) = 0.000820676
+cycle = 2  norm(lambda1,lambda2) = 0.000227372
+cycle = 3  norm(lambda1,lambda2) = 7.32653e-05
+cycle = 4  norm(lambda1,lambda2) = 9.0761e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -1.40905990658797
+  alpha nocc = 2  HOMO = -0.180345465932523  LUMO = -0.0983505872554728
+  beta  nocc = 1  HOMO = -1.39067141408531  LUMO = -0.180345465932523
+
+WARN: system HOMO -0.180345465932523 >= system LUMO -0.180345465932523
+
+cycle= 1 E= -2.55971814798947  delta_E= -1.15  |g|= 0.15  |ddm|=  1.9
+  alpha nocc = 2  HOMO = 0.0783817960518499  LUMO = 0.524216003164177
+  beta  nocc = 1  HOMO = -0.579953168463118  LUMO = 0.236399137356295
+cycle= 2 E= -2.61652100537722  delta_E= -0.0568  |g|= 0.0465  |ddm|= 1.09
+  alpha nocc = 2  HOMO = 0.0529730961959111  LUMO = 0.493539584785275
+  beta  nocc = 1  HOMO = -0.67983261148467  LUMO = 0.22245791111785
+cycle= 3 E= -2.6219287176025  delta_E= -0.00541  |g|= 0.00425  |ddm|= 0.507
+  alpha nocc = 2  HOMO = 0.061227843427209  LUMO = 0.495715438882382
+  beta  nocc = 1  HOMO = -0.67356465050482  LUMO = 0.222531373586595
+cycle= 4 E= -2.6219680298589  delta_E= -3.93e-05  |g|= 0.000622  |ddm|= 0.0438
+  alpha nocc = 2  HOMO = 0.0587193283839488  LUMO = 0.494571748465277
+  beta  nocc = 1  HOMO = -0.677514836782821  LUMO = 0.222187716476446
+cycle= 5 E= -2.6219685263577  delta_E= -4.96e-07  |g|= 8.89e-05  |ddm|= 0.00305
+  alpha nocc = 2  HOMO = 0.0592689947030796  LUMO = 0.494807547363974
+  beta  nocc = 1  HOMO = -0.67672271152106  LUMO = 0.222262551084623
+cycle= 6 E= -2.62196853736819  delta_E= -1.1e-08  |g|= 1.45e-06  |ddm|= 0.000387
+  alpha nocc = 2  HOMO = 0.0592789342545363  LUMO = 0.494811800842305
+  beta  nocc = 1  HOMO = -0.676709747868772  LUMO = 0.222264004710909
+cycle= 7 E= -2.62196853737037  delta_E= -2.18e-12  |g|= 5.28e-07  |ddm|= 6.59e-06
+  alpha nocc = 2  HOMO = 0.059276227176741  LUMO = 0.494810631362043
+  beta  nocc = 1  HOMO = -0.676713195777181  LUMO = 0.22226360863395
+Extra cycle  E= -2.62196853737067  delta_E= -3.02e-13  |g|= 1.56e-07  |ddm|= 1.15e-06
+converged SCF energy = -2.62196853737067  <S^2> = 0.75003574  2S+1 = 2.0000357
+**** SCF Summaries ****
+Total Energy =                          -2.621968537370670
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -3.941809973172289
+Two-electron Energy =                    1.319841435801619
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.684690298365837 | -0.676713195777181 occ= 1 | 1
+MO #2   energy= 0.059276227176741  | 0.22226360863395   occ= 1 | 0
+MO #3   energy= 0.494810631362043  | 0.512104524023473  occ= 0 | 0
+MO #4   energy= 0.494810631362043  | 0.512104524023473  occ= 0 | 0
+MO #5   energy= 0.494810631362043  | 0.512104524023473  occ= 0 | 0
+MO #6   energy= 0.63273474709151   | 0.648786187745466  occ= 0 | 0
+MO #7   energy= 1.8876060313738    | 1.89306489328447   occ= 0 | 0
+MO #8   energy= 1.8876060313738    | 1.89306489328447   occ= 0 | 0
+MO #9   energy= 1.8876060313738    | 1.89306489328447   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01763
+spin_pop of  0 H 2s        0.77625
+spin_pop of  0 H 3s        0.20613
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.92271 | 0.90508   
+pop of  0 H 2s        0.83819 | 0.06194   
+pop of  0 H 3s        0.23910 | 0.03297   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.017298789317448
+Init E_corr(CCSD) = -0.0172987893174684
+cycle = 1  E_corr(CCSD) = -0.0208892342581507  dE = -0.00359044494  norm(t1,t2) = 0.0142961
+cycle = 2  E_corr(CCSD) = -0.0216577761362877  dE = -0.000768541878  norm(t1,t2) = 0.00380037
+cycle = 3  E_corr(CCSD) = -0.0218997390867209  dE = -0.00024196295  norm(t1,t2) = 0.00121408
+cycle = 4  E_corr(CCSD) = -0.0218837709421789  dE = 1.59681445e-05  norm(t1,t2) = 0.000196492
+cycle = 5  E_corr(CCSD) = -0.0218844557640097  dE = -6.84821831e-07  norm(t1,t2) = 2.02224e-05
+cycle = 6  E_corr(CCSD) = -0.0218844647071438  dE = -8.94313418e-09  norm(t1,t2) = 1.65206e-06
+UCCSD converged
+E(UCCSD) = -2.643853002077813  E_corr = -0.02188446470714385
+UCCSD(T) correction = -6.31983027954856e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000457739
+cycle = 2  norm(lambda1,lambda2) = 0.000114221
+cycle = 3  norm(lambda1,lambda2) = 3.29853e-05
+cycle = 4  norm(lambda1,lambda2) = 4.24553e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -1.68007615371875
+  alpha nocc = 2  HOMO = -0.272802169011951  LUMO = -0.210438841802389
+  beta  nocc = 1  HOMO = -1.75433446852206  LUMO = -0.272802169011951
+
+WARN: system HOMO -0.272802169011951 >= system LUMO -0.272802169011951
+
+cycle= 1 E= -3.31191113064072  delta_E= -1.63  |g|= 0.143  |ddm|=  2.4
+  alpha nocc = 2  HOMO = 0.036853323660293  LUMO = 0.446508210775964
+  beta  nocc = 1  HOMO = -0.873058744680461  LUMO = 0.193456890946603
+cycle= 2 E= -3.38661328662748  delta_E= -0.0747  |g|= 0.0571  |ddm|= 1.23
+  alpha nocc = 2  HOMO = -0.011848105121841  LUMO = 0.400600740736997
+  beta  nocc = 1  HOMO = -1.01554130368157  LUMO = 0.172032112964867
+cycle= 3 E= -3.39708645278094  delta_E= -0.0105  |g|= 0.00448  |ddm|= 0.701
+  alpha nocc = 2  HOMO = 0.00751292960702411  LUMO = 0.405960748413504
+  beta  nocc = 1  HOMO = -1.00048671584348  LUMO = 0.172978749012221
+cycle= 4 E= -3.39713448991967  delta_E= -4.8e-05  |g|= 0.000542  |ddm|= 0.052
+  alpha nocc = 2  HOMO = 0.00479773158946934  LUMO = 0.404929274315915
+  beta  nocc = 1  HOMO = -1.00373069871049  LUMO = 0.172685353623994
+cycle= 5 E= -3.39713478788319  delta_E= -2.98e-07  |g|= 2.6e-05  |ddm|= 0.00251
+  alpha nocc = 2  HOMO = 0.00482032105084054  LUMO = 0.404934841937976
+  beta  nocc = 1  HOMO = -1.00370948502926  LUMO = 0.172685696521338
+cycle= 6 E= -3.39713478850257  delta_E= -6.19e-10  |g|= 1.24e-06  |ddm|= 0.000119
+  alpha nocc = 2  HOMO = 0.00481118845803107  LUMO = 0.404931846485992
+  beta  nocc = 1  HOMO = -1.00371828242584  LUMO = 0.172684890807283
+cycle= 7 E= -3.39713478850554  delta_E= -2.97e-12  |g|= 1.13e-07  |ddm|= 1.2e-05
+  alpha nocc = 2  HOMO = 0.00481002253053702  LUMO = 0.404931413426977
+  beta  nocc = 1  HOMO = -1.00371959351778  LUMO = 0.172684752889792
+Extra cycle  E= -3.39713478850555  delta_E= -1.2e-14  |g|= 2.8e-08  |ddm|= 2.2e-07
+converged SCF energy = -3.39713478850555  <S^2> = 0.75001563  2S+1 = 2.0000156
+**** SCF Summaries ****
+Total Energy =                          -3.397134788505553
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -4.786074131845886
+Two-electron Energy =                    1.388939343340333
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -1.00928589488295  | -1.00371959351778  occ= 1 | 1
+MO #2   energy= 0.00481002253053702 | 0.172684752889792  occ= 1 | 0
+MO #3   energy= 0.404931413426977  | 0.427136111564948  occ= 0 | 0
+MO #4   energy= 0.404931413426977  | 0.427136111564949  occ= 0 | 0
+MO #5   energy= 0.404931413426977  | 0.427136111564949  occ= 0 | 0
+MO #6   energy= 0.499833923706298  | 0.520401882442864  occ= 0 | 0
+MO #7   energy= 1.70012949337701   | 1.70522706850575   occ= 0 | 0
+MO #8   energy= 1.70012949337701   | 1.70522706850575   occ= 0 | 0
+MO #9   energy= 1.70012949337701   | 1.70522706850575   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.03911
+spin_pop of  0 H 2s        0.80666
+spin_pop of  0 H 3s        0.15422
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.88510 | 0.84599   
+pop of  0 H 2s        0.90419 | 0.09752   
+pop of  0 H 3s        0.21071 | 0.05649   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.0156215141095797
+Init E_corr(CCSD) = -0.0156215141095803
+cycle = 1  E_corr(CCSD) = -0.0187002550822058  dE = -0.00307874097  norm(t1,t2) = 0.0122962
+cycle = 2  E_corr(CCSD) = -0.0193230161654287  dE = -0.000622761083  norm(t1,t2) = 0.00322719
+cycle = 3  E_corr(CCSD) = -0.0195079006216715  dE = -0.000184884456  norm(t1,t2) = 0.0010513
+cycle = 4  E_corr(CCSD) = -0.019492098723229  dE = 1.58018984e-05  norm(t1,t2) = 0.000164578
+cycle = 5  E_corr(CCSD) = -0.0194924454818123  dE = -3.46758583e-07  norm(t1,t2) = 1.11642e-05
+cycle = 6  E_corr(CCSD) = -0.0194924429595777  dE = 2.52223455e-09  norm(t1,t2) = 5.93433e-07
+UCCSD converged
+E(UCCSD) = -3.416627231465131  E_corr = -0.01949244295957773
+UCCSD(T) correction = -2.83680135912133e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000322879
+cycle = 2  norm(lambda1,lambda2) = 8.07822e-05
+cycle = 3  norm(lambda1,lambda2) = 2.50844e-05
+cycle = 4  norm(lambda1,lambda2) = 3.79665e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -1.95109240084954
+  alpha nocc = 2  HOMO = -0.377960307029762  LUMO = -0.329275974585731
+  beta  nocc = 1  HOMO = -2.12729171206805  LUMO = -0.377960307029762
+
+WARN: system HOMO -0.377960307029762 >= system LUMO -0.377960307029762
+
+cycle= 1 E= -4.11637395763585  delta_E= -2.17  |g|= 0.123  |ddm|= 2.97
+  alpha nocc = 2  HOMO = -0.0157143449939979  LUMO = 0.342602053250697
+  beta  nocc = 1  HOMO = -1.20166779548848  LUMO = 0.147551108865609
+cycle= 2 E= -4.18746569538025  delta_E= -0.0711  |g|= 0.0593  |ddm|= 1.37
+  alpha nocc = 2  HOMO = -0.0815048371111406  LUMO = 0.30680817258104
+  beta  nocc = 1  HOMO = -1.36229975874461  LUMO = 0.122291735935463
+cycle= 3 E= -4.20170712280816  delta_E= -0.0142  |g|= 0.00439  |ddm|= 0.787
+  alpha nocc = 2  HOMO = -0.053191973541145  LUMO = 0.312922891997236
+  beta  nocc = 1  HOMO = -1.34608891948351  LUMO = 0.123123620294147
+cycle= 4 E= -4.20176006967692  delta_E= -5.29e-05  |g|= 0.00052  |ddm|= 0.0528
+  alpha nocc = 2  HOMO = -0.0533032082122288  LUMO = 0.312798205530281
+  beta  nocc = 1  HOMO = -1.34662425554496  LUMO = 0.123088710187041
+cycle= 5 E= -4.20176029375552  delta_E= -2.24e-07  |g|= 1.93e-05  |ddm|= 0.00207
+  alpha nocc = 2  HOMO = -0.0532705628119318  LUMO = 0.312799746059412
+  beta  nocc = 1  HOMO = -1.34662210000563  LUMO = 0.12308637265561
+cycle= 6 E= -4.20176029420419  delta_E= -4.49e-10  |g|= 3.68e-06  |ddm|= 0.000184
+  alpha nocc = 2  HOMO = -0.0532836919172445  LUMO = 0.312797802725287
+  beta  nocc = 1  HOMO = -1.34662680167768  LUMO = 0.123086577294364
+cycle= 7 E= -4.20176029424739  delta_E= -4.32e-11  |g|= 1.03e-07  |ddm|= 5.07e-05
+  alpha nocc = 2  HOMO = -0.0532856620952936  LUMO = 0.312797213213048
+  beta  nocc = 1  HOMO = -1.34662850040318  LUMO = 0.123086407163215
+Extra cycle  E= -4.20176029424739  delta_E= -7.99e-15  |g|= 1.91e-08  |ddm|= 2.04e-07
+converged SCF energy = -4.20176029424739  <S^2> = 0.75000849  2S+1 = 2.0000085
+**** SCF Summaries ****
+Total Energy =                          -4.201760294247394
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -5.652061401487590
+Two-electron Energy =                    1.450301107240196
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -1.35154503544167  | -1.34662850040318  occ= 1 | 1
+MO #2   energy= -0.0532856620952936 | 0.123086407163215  occ= 1 | 0
+MO #3   energy= 0.312797213213048  | 0.341750220772827  occ= 0 | 0
+MO #4   energy= 0.312797213213048  | 0.341750220772827  occ= 0 | 0
+MO #5   energy= 0.312797213213048  | 0.341750220772827  occ= 0 | 0
+MO #6   energy= 0.380117902342105  | 0.408128761763471  occ= 0 | 0
+MO #7   energy= 1.50800571125081   | 1.51360067481087   occ= 0 | 0
+MO #8   energy= 1.50800571125081   | 1.51360067481087   occ= 0 | 0
+MO #9   energy= 1.50800571125081   | 1.51360067481087   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.06913
+spin_pop of  0 H 2s        0.83809
+spin_pop of  0 H 3s        0.09277
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.86759 | 0.79846   
+pop of  0 H 2s        0.96208 | 0.12398   
+pop of  0 H 3s        0.17033 | 0.07756   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.0145482315699386
+Init E_corr(CCSD) = -0.0145482315699388
+cycle = 1  E_corr(CCSD) = -0.0172610187204867  dE = -0.00271278715  norm(t1,t2) = 0.0111768
+cycle = 2  E_corr(CCSD) = -0.0177805451457649  dE = -0.000519526425  norm(t1,t2) = 0.00321056
+cycle = 3  E_corr(CCSD) = -0.0179370710276077  dE = -0.000156525882  norm(t1,t2) = 0.00121893
+cycle = 4  E_corr(CCSD) = -0.0179147337014831  dE = 2.23373261e-05  norm(t1,t2) = 0.000199952
+cycle = 5  E_corr(CCSD) = -0.0179150522745996  dE = -3.18573117e-07  norm(t1,t2) = 1.00239e-05
+cycle = 6  E_corr(CCSD) = -0.0179150452993947  dE = 6.97520494e-09  norm(t1,t2) = 8.17063e-07
+UCCSD converged
+E(UCCSD) = -4.219675339546788  E_corr = -0.0179150452993947
+UCCSD(T) correction = -1.88255410312439e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000262459
+cycle = 2  norm(lambda1,lambda2) = 7.22638e-05
+cycle = 3  norm(lambda1,lambda2) = 2.69438e-05
+cycle = 4  norm(lambda1,lambda2) = 4.54717e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -2.22210864798032
+  alpha nocc = 2  HOMO = -0.489556736433898  LUMO = -0.456941216059782
+  beta  nocc = 1  HOMO = -2.50629483933091  LUMO = -0.489556736433898
+
+WARN: system HOMO -0.489556736433898 >= system LUMO -0.489556736433898
+
+cycle= 1 E= -4.96124817783705  delta_E= -2.74  |g|= 0.105  |ddm|= 3.44
+  alpha nocc = 2  HOMO = -0.0857752385964614  LUMO = 0.241338708478482
+  beta  nocc = 1  HOMO = -1.55872130509015  LUMO = 0.0979004970005978
+cycle= 2 E= -5.01413607995335  delta_E= -0.0529  |g|= 0.0535  |ddm|= 1.37
+  alpha nocc = 2  HOMO = -0.141416661876188  LUMO = 0.222473425178905
+  beta  nocc = 1  HOMO = -1.68549050906303  LUMO = 0.0769019833717175
+cycle= 3 E= -5.02787905100891  delta_E= -0.0137  |g|= 0.0071  |ddm|= 0.748
+  alpha nocc = 2  HOMO = -0.115335707921003  LUMO = 0.221711966572863
+  beta  nocc = 1  HOMO = -1.68960142878003  LUMO = 0.0735964294265262
+cycle= 4 E= -5.0280590391464  delta_E= -0.00018  |g|= 0.000359  |ddm|= 0.0979
+  alpha nocc = 2  HOMO = -0.118089119315378  LUMO = 0.221220572387495
+  beta  nocc = 1  HOMO = -1.69098753437754  LUMO = 0.0735788006705774
+cycle= 5 E= -5.02805911943423  delta_E= -8.03e-08  |g|= 3.04e-05  |ddm|= 0.00106
+  alpha nocc = 2  HOMO = -0.118045475821042  LUMO = 0.221207708834806
+  beta  nocc = 1  HOMO = -1.69101910264533  LUMO = 0.0735640424027787
+cycle= 6 E= -5.02805912212008  delta_E= -2.69e-09  |g|= 2.77e-06  |ddm|= 0.000404
+  alpha nocc = 2  HOMO = -0.118035491253999  LUMO = 0.221211520899293
+  beta  nocc = 1  HOMO = -1.69100844601613  LUMO = 0.0735655880261901
+cycle= 7 E= -5.02805912214678  delta_E= -2.67e-11  |g|= 8.63e-08  |ddm|= 3.79e-05
+  alpha nocc = 2  HOMO = -0.118037555001869  LUMO = 0.221211149372452
+  beta  nocc = 1  HOMO = -1.6910094354311  LUMO = 0.0735655492792202
+Extra cycle  E= -5.02805912214678  delta_E= -4.44e-15  |g|= 1.37e-08  |ddm|= 2.12e-07
+converged SCF energy = -5.02805912214678  <S^2> = 0.75000378  2S+1 = 2.0000038
+**** SCF Summaries ****
+Total Energy =                          -5.028059122146781
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -6.550757067249886
+Two-electron Energy =                    1.522697945103105
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -1.69631419055012  | -1.6910094354311   occ= 1 | 1
+MO #2   energy= -0.118037555001869 | 0.0735655492792202 occ= 1 | 0
+MO #3   energy= 0.221211149372452  | 0.25979732766934   occ= 0 | 0
+MO #4   energy= 0.221211149372452  | 0.25979732766934   occ= 0 | 0
+MO #5   energy= 0.221211149372452  | 0.25979732766934   occ= 0 | 0
+MO #6   energy= 0.273386662892577  | 0.311372000046755  occ= 0 | 0
+MO #7   energy= 1.32206799180624   | 1.32890652915593   occ= 0 | 0
+MO #8   energy= 1.32206799180624   | 1.32890652915593   occ= 0 | 0
+MO #9   energy= 1.32206799180624   | 1.32890652915593   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.11365
+spin_pop of  0 H 2s        0.85470
+spin_pop of  0 H 3s        0.03166
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.87562 | 0.76198   
+pop of  0 H 2s        0.99776 | 0.14306   
+pop of  0 H 3s        0.12662 | 0.09496   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 161 MB)
+Init t2, MP2 energy = -0.0139240061760746
+Init E_corr(CCSD) = -0.0139240061760747
+cycle = 1  E_corr(CCSD) = -0.0163786517333416  dE = -0.00245464556  norm(t1,t2) = 0.0105968
+cycle = 2  E_corr(CCSD) = -0.0168252884795944  dE = -0.000446636746  norm(t1,t2) = 0.00351206
+cycle = 3  E_corr(CCSD) = -0.0169683901403191  dE = -0.000143101661  norm(t1,t2) = 0.00155138
+cycle = 4  E_corr(CCSD) = -0.0169383669304591  dE = 3.00232099e-05  norm(t1,t2) = 0.000230381
+cycle = 5  E_corr(CCSD) = -0.0169387077100123  dE = -3.40779553e-07  norm(t1,t2) = 1.05864e-05
+cycle = 6  E_corr(CCSD) = -0.0169386966740462  dE = 1.10359661e-08  norm(t1,t2) = 1.08866e-06
+UCCSD converged
+E(UCCSD) = -5.044997818820827  E_corr = -0.01693869667404625
+UCCSD(T) correction = -1.66245419648959e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000229501
+cycle = 2  norm(lambda1,lambda2) = 6.8046e-05
+cycle = 3  norm(lambda1,lambda2) = 2.90756e-05
+cycle = 4  norm(lambda1,lambda2) = 5.17996e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 161 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -2.49312489511111
+  alpha nocc = 2  HOMO = -0.603504790144098  LUMO = -0.59569110267434
+  beta  nocc = 1  HOMO = -2.88937670314146  LUMO = -0.603504790144098
+
+WARN: system HOMO -0.603504790144098 >= system LUMO -0.603504790144098
+
+cycle= 1 E= -5.82928379426176  delta_E= -3.34  |g|= 0.0949  |ddm|= 3.78
+  alpha nocc = 2  HOMO = -0.171415648119922  LUMO = 0.159850259420785
+  beta  nocc = 1  HOMO = -1.93186223367205  LUMO = 0.0441257020665931
+cycle= 2 E= -5.86395578673309  delta_E= -0.0347  |g|= 0.0438  |ddm|= 1.19
+  alpha nocc = 2  HOMO = -0.203230589348388  LUMO = 0.138937954114855
+  beta  nocc = 1  HOMO = -2.00778501965401  LUMO = 0.0302976747248266
+cycle= 3 E= -5.87342844047755  delta_E= -0.00947  |g|= 0.00935  |ddm|= 0.659
+  alpha nocc = 2  HOMO = -0.190872244735786  LUMO = 0.130079637330182
+  beta  nocc = 1  HOMO = -2.03301414080966  LUMO = 0.0227452908828611
+cycle= 4 E= -5.87381041046033  delta_E= -0.000382  |g|= 0.000618  |ddm|= 0.157
+  alpha nocc = 2  HOMO = -0.193122262041641  LUMO = 0.130598384515117
+  beta  nocc = 1  HOMO = -2.03155443725118  LUMO = 0.0233841980672734
+cycle= 5 E= -5.87381214962533  delta_E= -1.74e-06  |g|= 2.16e-05  |ddm|= 0.00991
+  alpha nocc = 2  HOMO = -0.193176159491659  LUMO = 0.130589721837516
+  beta  nocc = 1  HOMO = -2.0315680523436  LUMO = 0.0233826596131188
+cycle= 6 E= -5.87381214999355  delta_E= -3.68e-10  |g|= 1.88e-06  |ddm|= 0.000109
+  alpha nocc = 2  HOMO = -0.193163351038872  LUMO = 0.130591485395547
+  beta  nocc = 1  HOMO = -2.0315636547304  LUMO = 0.0233825431505113
+cycle= 7 E= -5.8738121500088  delta_E= -1.52e-11  |g|= 6.66e-08  |ddm|= 2.9e-05
+  alpha nocc = 2  HOMO = -0.193164708345507  LUMO = 0.130591478680701
+  beta  nocc = 1  HOMO = -2.03156363301843  LUMO = 0.0233826825350327
+Extra cycle  E= -5.8738121500088  delta_E= -1.78e-15  |g|= 8.51e-09  |ddm|= 1.55e-07
+converged SCF energy = -5.8738121500088  <S^2> = 0.75000061  2S+1 = 2.0000006
+**** SCF Summaries ****
+Total Energy =                          -5.873812150008797
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -7.484965204097886
+Two-electron Energy =                    1.611153054089089
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -2.03793075511791  | -2.03156363301843  occ= 1 | 1
+MO #2   energy= -0.193164708345507 | 0.0233826825350327 occ= 1 | 0
+MO #3   energy= 0.130591478680701  | 0.180878017141685  occ= 0 | 0
+MO #4   energy= 0.130591478680701  | 0.180878017141685  occ= 0 | 0
+MO #5   energy= 0.130591478680701  | 0.180878017141685  occ= 0 | 0
+MO #6   energy= 0.181163689146098  | 0.227456699931098  occ= 0 | 0
+MO #7   energy= 1.14560268874617   | 1.15434991768185   occ= 0 | 0
+MO #8   energy= 1.14560268874617   | 1.15434991768185   occ= 0 | 0
+MO #9   energy= 1.14560268874617   | 1.15434991768185   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.17261
+spin_pop of  0 H 2s        0.82675
+spin_pop of  0 H 3s        0.00064
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.90640 | 0.73380   
+pop of  0 H 2s        0.98383 | 0.15708   
+pop of  0 H 3s        0.10976 | 0.10913   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.013628491200281
+Init E_corr(CCSD) = -0.0136284912002811
+cycle = 1  E_corr(CCSD) = -0.0159116485794677  dE = -0.00228315738  norm(t1,t2) = 0.0101268
+cycle = 2  E_corr(CCSD) = -0.0163080624908922  dE = -0.000396413911  norm(t1,t2) = 0.00359753
+cycle = 3  E_corr(CCSD) = -0.0164376789923189  dE = -0.000129616501  norm(t1,t2) = 0.00168706
+cycle = 4  E_corr(CCSD) = -0.0164063543829343  dE = 3.13246094e-05  norm(t1,t2) = 0.000220441
+cycle = 5  E_corr(CCSD) = -0.0164066748123382  dE = -3.20429404e-07  norm(t1,t2) = 1.00548e-05
+cycle = 6  E_corr(CCSD) = -0.0164066616263269  dE = 1.31860112e-08  norm(t1,t2) = 9.55329e-07
+UCCSD converged
+E(UCCSD) = -5.890218811635124  E_corr = -0.01640666162632692
+UCCSD(T) correction = -1.60273215603948e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000205951
+cycle = 2  norm(lambda1,lambda2) = 5.70657e-05
+cycle = 3  norm(lambda1,lambda2) = 2.5051e-05
+cycle = 4  norm(lambda1,lambda2) = 5.27783e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -2.7641411422419
+
+WARN: alpha nocc = 2  HOMO -0.747428016359488 >= LUMO -0.747428016359488
+
+  beta  nocc = 1  HOMO = -3.27530920345186  LUMO = -0.747428016359488
+
+WARN: system HOMO -0.747428016359488 >= system LUMO -0.747428016359488
+
+cycle= 1 E= -6.58019767959319  delta_E= -3.82  |g|= 0.251  |ddm|= 2.47
+  alpha nocc = 2  HOMO = -0.178466458002516  LUMO = -0.0294722998227397
+  beta  nocc = 1  HOMO = -2.1346385863254  LUMO = -0.0086242148105822
+cycle= 2 E= -6.65130130676904  delta_E= -0.0711  |g|= 0.076  |ddm|= 0.371
+  alpha nocc = 2  HOMO = -0.21116361184086  LUMO = -0.0531981136853169
+  beta  nocc = 1  HOMO = -2.27460204990743  LUMO = -0.0149186733238183
+cycle= 3 E= -6.65794624053614  delta_E= -0.00664  |g|= 0.00296  |ddm|= 0.156
+  alpha nocc = 2  HOMO = -0.19881875857603  LUMO = -0.0517320596216629
+  beta  nocc = 1  HOMO = -2.26589321481254  LUMO = -0.0146501658394263
+cycle= 4 E= -6.65795095393266  delta_E= -4.71e-06  |g|= 0.000112  |ddm|= 0.00661
+  alpha nocc = 2  HOMO = -0.201254708318948  LUMO = -0.0520608231986885
+  beta  nocc = 1  HOMO = -2.26774240335184  LUMO = -0.0147003730535065
+cycle= 5 E= -6.65795096258279  delta_E= -8.65e-09  |g|= 1.31e-05  |ddm|= 0.00023
+  alpha nocc = 2  HOMO = -0.20109924270821  LUMO = -0.0520415936788689
+  beta  nocc = 1  HOMO = -2.2676284894456  LUMO = -0.0146977298757663
+cycle= 6 E= -6.65795096267139  delta_E= -8.86e-11  |g|= 8.26e-08  |ddm|= 2.88e-05
+  alpha nocc = 2  HOMO = -0.20109873885217  LUMO = -0.0520415291276223
+  beta  nocc = 1  HOMO = -2.26762814073086  LUMO = -0.014697718753213
+Extra cycle  E= -6.6579509626714  delta_E= -6.22e-15  |g|= 1.29e-08  |ddm|= 1.67e-07
+converged SCF energy = -6.6579509626714  <S^2> = 0.75014549  2S+1 = 2.0001455
+**** SCF Summaries ****
+Total Energy =                          -6.657950962671398
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -8.551076532203455
+Two-electron Energy =                    1.893125569532056
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -2.29609851005115  | -2.26762814073086  occ= 1 | 1
+MO #2   energy= -0.20109873885217  | -0.014697718753213 occ= 1 | 0
+MO #3   energy= -0.0520415291276223 | 0.132400262436066  occ= 0 | 0
+MO #4   energy= 0.111062541044723  | 0.132400262436066  occ= 0 | 0
+MO #5   energy= 0.111062541044723  | 0.174164343130694  occ= 0 | 0
+MO #6   energy= 0.145317414742143  | 0.183472628677981  occ= 0 | 0
+MO #7   energy= 1.01634445193289   | 1.05809318952923   occ= 0 | 0
+MO #8   energy= 1.04802851607248   | 1.05809318952923   occ= 0 | 0
+MO #9   energy= 1.04802851607248   | 1.09534735713974   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01078
+spin_pop of  0 H 2s       -0.00538
+spin_pop of  0 H 3s       -0.00540
+spin_pop of  0 H 2px       0.76871
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.23129
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.72066 | 0.70988   
+pop of  0 H 2s        0.16241 | 0.16779   
+pop of  0 H 3s        0.11693 | 0.12233   
+pop of  0 H 2px       0.76871 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.23129 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.0113555887181577
+Init E_corr(CCSD) = -0.0113555887181577
+cycle = 1  E_corr(CCSD) = -0.0131950856303823  dE = -0.00183949691  norm(t1,t2) = 0.00771786
+cycle = 2  E_corr(CCSD) = -0.0135021516937807  dE = -0.000307066063  norm(t1,t2) = 0.00154348
+cycle = 3  E_corr(CCSD) = -0.013570869021045  dE = -6.87173273e-05  norm(t1,t2) = 0.000361239
+cycle = 4  E_corr(CCSD) = -0.0135682504615072  dE = 2.61855954e-06  norm(t1,t2) = 3.27392e-05
+cycle = 5  E_corr(CCSD) = -0.0135683100826222  dE = -5.9621115e-08  norm(t1,t2) = 1.99555e-06
+UCCSD converged
+E(UCCSD) = -6.67151927275402  E_corr = -0.01356831008262217
+UCCSD(T) correction = -2.87915785935794e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000173551
+cycle = 2  norm(lambda1,lambda2) = 4.30332e-05
+cycle = 3  norm(lambda1,lambda2) = 1.18002e-05
+cycle = 4  norm(lambda1,lambda2) = 6.26083e-07
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -3.03515738937268
+
+WARN: alpha nocc = 2  HOMO -0.913004280448689 >= LUMO -0.913004280448689
+
+  beta  nocc = 1  HOMO = -3.66329849844427  LUMO = -0.913004280448689
+
+WARN: system HOMO -0.913004280448689 >= system LUMO -0.913004280448689
+
+cycle= 1 E= -7.4784254149608  delta_E= -4.44  |g|= 0.247  |ddm|= 2.57
+  alpha nocc = 2  HOMO = -0.297804929223112  LUMO = -0.0955612807751145
+  beta  nocc = 1  HOMO = -2.47900518429094  LUMO = -0.071019009727559
+cycle= 2 E= -7.55253634687774  delta_E= -0.0741  |g|= 0.0789  |ddm|= 0.384
+  alpha nocc = 2  HOMO = -0.335360771278241  LUMO = -0.128729365691598
+  beta  nocc = 1  HOMO = -2.63178208160883  LUMO = -0.0816456893104866
+cycle= 3 E= -7.56039326280402  delta_E= -0.00786  |g|= 0.00347  |ddm|= 0.17
+  alpha nocc = 2  HOMO = -0.320124649841717  LUMO = -0.1269639831255
+  beta  nocc = 1  HOMO = -2.62481923951513  LUMO = -0.0813825269087141
+cycle= 4 E= -7.56039940127267  delta_E= -6.14e-06  |g|= 0.000228  |ddm|= 0.00759
+  alpha nocc = 2  HOMO = -0.323400795737243  LUMO = -0.127414531522912
+  beta  nocc = 1  HOMO = -2.62665221086646  LUMO = -0.0814499121347964
+cycle= 5 E= -7.56039942444237  delta_E= -2.32e-08  |g|= 1.17e-05  |ddm|= 0.000497
+  alpha nocc = 2  HOMO = -0.323269762822433  LUMO = -0.127398268952532
+  beta  nocc = 1  HOMO = -2.62658252411592  LUMO = -0.0814482039232935
+cycle= 6 E= -7.56039942450612  delta_E= -6.38e-11  |g|= 5.78e-07  |ddm|= 2.22e-05
+  alpha nocc = 2  HOMO = -0.323263983965474  LUMO = -0.127397520771558
+  beta  nocc = 1  HOMO = -2.62657923438795  LUMO = -0.0814481244893631
+Extra cycle  E= -7.56039942450627  delta_E= -1.47e-13  |g|= 9.23e-08  |ddm|= 9.4e-07
+converged SCF energy = -7.56039942450627  <S^2> = 0.75014336  2S+1 = 2.0001434
+**** SCF Summaries ****
+Total Energy =                          -7.560399424506268
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -9.507585574518050
+Two-electron Energy =                    1.947186150011782
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -2.66337010092808  | -2.62657923438795  occ= 1 | 1
+MO #2   energy= -0.323263983965474 | -0.0814481244893631 occ= 1 | 0
+MO #3   energy= -0.127397520771558 | 0.0273412948538805 occ= 0 | 0
+MO #4   energy= 0.0057830979884983 | 0.0273412948538807 occ= 0 | 0
+MO #5   energy= 0.00578309798849863 | 0.0694752475498223 occ= 0 | 0
+MO #6   energy= 0.0677057541964994 | 0.0953686459538525 occ= 0 | 0
+MO #7   energy= 0.818482744218107  | 0.871581374055641  occ= 0 | 0
+MO #8   energy= 0.859798193085976  | 0.871581374055642  occ= 0 | 0
+MO #9   energy= 0.859798193085977  | 0.912278409508908  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01087
+spin_pop of  0 H 2s       -0.00527
+spin_pop of  0 H 3s       -0.00560
+spin_pop of  0 H 2px       0.05416
+spin_pop of  0 H 2py       0.72756
+spin_pop of  0 H 2pz       0.04601
+spin_pop of  0 H 3px       0.01127
+spin_pop of  0 H 3py       0.15142
+spin_pop of  0 H 3pz       0.00958
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.70328 | 0.69241   
+pop of  0 H 2s        0.17103 | 0.17630   
+pop of  0 H 3s        0.12569 | 0.13129   
+pop of  0 H 2px       0.05416 | 0.00000   
+pop of  0 H 2py       0.72756 | 0.00000   
+pop of  0 H 2pz       0.04601 | 0.00000   
+pop of  0 H 3px       0.01127 | 0.00000   
+pop of  0 H 3py       0.15142 | 0.00000   
+pop of  0 H 3pz       0.00958 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.0104577341864782
+Init E_corr(CCSD) = -0.0104577341864814
+cycle = 1  E_corr(CCSD) = -0.0120717937969297  dE = -0.00161405961  norm(t1,t2) = 0.00695134
+cycle = 2  E_corr(CCSD) = -0.012330307072652  dE = -0.000258513276  norm(t1,t2) = 0.0013966
+cycle = 3  E_corr(CCSD) = -0.0123867938210313  dE = -5.64867484e-05  norm(t1,t2) = 0.000341625
+cycle = 4  E_corr(CCSD) = -0.0123839758224939  dE = 2.81799854e-06  norm(t1,t2) = 3.33646e-05
+cycle = 5  E_corr(CCSD) = -0.0123840233113394  dE = -4.74888455e-08  norm(t1,t2) = 1.33089e-06
+UCCSD converged
+E(UCCSD) = -7.572783447817608  E_corr = -0.01238402331133938
+UCCSD(T) correction = -2.35590581910271e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000153353
+cycle = 2  norm(lambda1,lambda2) = 4.15227e-05
+cycle = 3  norm(lambda1,lambda2) = 1.24628e-05
+cycle = 4  norm(lambda1,lambda2) = 6.1976e-07
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -3.30617363650347
+
+WARN: alpha nocc = 2  HOMO -1.09183618113642 >= LUMO -1.09183618113642
+
+  beta  nocc = 1  HOMO = -4.05281383166491  LUMO = -1.09183618113642
+
+WARN: system HOMO -1.09183618113642 >= system LUMO -1.09183618113642
+
+cycle= 1 E= -8.39789059499604  delta_E= -5.09  |g|= 0.237  |ddm|= 2.65
+  alpha nocc = 2  HOMO = -0.430461359920977  LUMO = -0.170729539576809
+  beta  nocc = 1  HOMO = -2.82978392350862  LUMO = -0.142312870242214
+cycle= 2 E= -8.46782636828103  delta_E= -0.0699  |g|= 0.0775  |ddm|= 0.38
+  alpha nocc = 2  HOMO = -0.468099094522911  LUMO = -0.209978783483182
+  beta  nocc = 1  HOMO = -2.97949800421899  LUMO = -0.157302063976114
+cycle= 3 E= -8.47597650123778  delta_E= -0.00815  |g|= 0.0042  |ddm|= 0.171
+  alpha nocc = 2  HOMO = -0.45338655273179  LUMO = -0.209208564828354
+  beta  nocc = 1  HOMO = -2.97832938714228  LUMO = -0.157558881954518
+cycle= 4 E= -8.47598723585562  delta_E= -1.07e-05  |g|= 0.000156  |ddm|= 0.00861
+  alpha nocc = 2  HOMO = -0.455957681126992  LUMO = -0.209489063739077
+  beta  nocc = 1  HOMO = -2.97917171068471  LUMO = -0.157566149999871
+cycle= 5 E= -8.47598724522427  delta_E= -9.37e-09  |g|= 6.14e-06  |ddm|= 0.000312
+  alpha nocc = 2  HOMO = -0.455907320436434  LUMO = -0.20948517061995
+  beta  nocc = 1  HOMO = -2.97915719813672  LUMO = -0.157567202927987
+cycle= 6 E= -8.4759872452403  delta_E= -1.6e-11  |g|= 7.45e-07  |ddm|= 1.08e-05
+  alpha nocc = 2  HOMO = -0.455900612410615  LUMO = -0.209484480723525
+  beta  nocc = 1  HOMO = -2.97915489126781  LUMO = -0.157567230029073
+Extra cycle  E= -8.47598724524052  delta_E= -2.22e-13  |g|= 1.08e-07  |ddm|= 1.11e-06
+converged SCF energy = -8.47598724524052  <S^2> = 0.75015059  2S+1 = 2.0001506
+**** SCF Summaries ****
+Total Energy =                          -8.475987245240525
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -10.490041341961851
+Two-electron Energy =                    2.014054096721326
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -3.02687769091806  | -2.97915489126781  occ= 1 | 1
+MO #2   energy= -0.455900612410615 | -0.157567230029073 occ= 1 | 0
+MO #3   energy= -0.209484480723525 | -0.08100781864685  occ= 0 | 0
+MO #4   energy= -0.103203426698641 | -0.0810078186468497 occ= 0 | 0
+MO #5   energy= -0.103203426698641 | -0.0377808404404155 occ= 0 | 0
+MO #6   energy= 0.00115479921972256 | 0.0197051712517571 occ= 0 | 0
+MO #7   energy= 0.630638418749627  | 0.695259028911346  occ= 0 | 0
+MO #8   energy= 0.681699449015859  | 0.695259028911347  occ= 0 | 0
+MO #9   energy= 0.681699449015859  | 0.739600053937736  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01126
+spin_pop of  0 H 2s       -0.00532
+spin_pop of  0 H 3s       -0.00594
+spin_pop of  0 H 2px       0.88845
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.11155
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.68946 | 0.67820   
+pop of  0 H 2s        0.17775 | 0.18307   
+pop of  0 H 3s        0.13279 | 0.13873   
+pop of  0 H 2px       0.88845 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.11155 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00959283439587627
+Init E_corr(CCSD) = -0.00959283439588037
+cycle = 1  E_corr(CCSD) = -0.011009016106836  dE = -0.00141618171  norm(t1,t2) = 0.00630805
+cycle = 2  E_corr(CCSD) = -0.0112279912882285  dE = -0.000218975181  norm(t1,t2) = 0.00130553
+cycle = 3  E_corr(CCSD) = -0.0112756014384101  dE = -4.76101502e-05  norm(t1,t2) = 0.000343183
+cycle = 4  E_corr(CCSD) = -0.0112724119274591  dE = 3.18951095e-06  norm(t1,t2) = 3.64795e-05
+cycle = 5  E_corr(CCSD) = -0.0112724609017796  dE = -4.89743206e-08  norm(t1,t2) = 1.86529e-06
+UCCSD converged
+E(UCCSD) = -8.487259706142304  E_corr = -0.01127246090177964
+UCCSD(T) correction = -1.91725264130536e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000136633
+cycle = 2  norm(lambda1,lambda2) = 4.00748e-05
+cycle = 3  norm(lambda1,lambda2) = 1.29063e-05
+cycle = 4  norm(lambda1,lambda2) = 5.56537e-07
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -3.57718988363425
+
+WARN: alpha nocc = 2  HOMO -1.28217324849522 >= LUMO -1.28217324849522
+
+  beta  nocc = 1  HOMO = -4.44348920694043  LUMO = -1.28217324849522
+
+WARN: system HOMO -1.28217324849522 >= system LUMO -1.28217324849522
+
+cycle= 1 E= -9.3387027793822  delta_E= -5.76  |g|= 0.224  |ddm|= 2.73
+  alpha nocc = 2  HOMO = -0.578900081302529  LUMO = -0.255468809612655
+  beta  nocc = 1  HOMO = -3.18900817688372  LUMO = -0.224353182517314
+cycle= 2 E= -9.39906997672817  delta_E= -0.0604  |g|= 0.0722  |ddm|= 0.364
+  alpha nocc = 2  HOMO = -0.611524421432478  LUMO = -0.2945560820818
+  beta  nocc = 1  HOMO = -3.32018655000082  LUMO = -0.241043332263233
+cycle= 3 E= -9.4063985780374  delta_E= -0.00733  |g|= 0.00507  |ddm|= 0.158
+  alpha nocc = 2  HOMO = -0.599805170230991  LUMO = -0.295674853337237
+  beta  nocc = 1  HOMO = -3.32599744614458  LUMO = -0.242243255507849
+cycle= 4 E= -9.40641986680043  delta_E= -2.13e-05  |g|= 9.91e-05  |ddm|= 0.0103
+  alpha nocc = 2  HOMO = -0.601499357381092  LUMO = -0.295766044523113
+  beta  nocc = 1  HOMO = -3.32614455137801  LUMO = -0.242185588830759
+cycle= 5 E= -9.4064198708837  delta_E= -4.08e-09  |g|= 6.01e-06  |ddm|= 0.000177
+  alpha nocc = 2  HOMO = -0.601460681985158  LUMO = -0.295765337776245
+  beta  nocc = 1  HOMO = -3.32614258319619  LUMO = -0.242188111376541
+cycle= 6 E= -9.40641987089667  delta_E= -1.3e-11  |g|= 7.54e-07  |ddm|= 9.62e-06
+  alpha nocc = 2  HOMO = -0.601454757014221  LUMO = -0.295765076163957
+  beta  nocc = 1  HOMO = -3.32614207452543  LUMO = -0.242188375554432
+Extra cycle  E= -9.40641987089687  delta_E= -2.04e-13  |g|= 1e-07  |ddm|= 1.04e-06
+converged SCF energy = -9.40641987089687  <S^2> = 0.75016082  2S+1 = 2.0001608
+**** SCF Summaries ****
+Total Energy =                          -9.406419870896871
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -11.498129863280644
+Two-electron Energy =                    2.091709992383773
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -3.38711309384492  | -3.32614207452543  occ= 1 | 1
+MO #2   energy= -0.601454757014221 | -0.242188375554432 occ= 1 | 0
+MO #3   energy= -0.295765076163957 | -0.193897103056706 occ= 0 | 0
+MO #4   energy= -0.217366847594814 | -0.193897103056706 occ= 0 | 0
+MO #5   energy= -0.217366847594814 | -0.148451537544802 occ= 0 | 0
+MO #6   energy= -0.0576479160914935 | -0.0452069200997459 occ= 0 | 0
+MO #7   energy= 0.455500903980342  | 0.529099177001161  occ= 0 | 0
+MO #8   energy= 0.514048387880519  | 0.529099177001161  occ= 0 | 0
+MO #9   energy= 0.514048387880519  | 0.576657137781616  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01173
+spin_pop of  0 H 2s       -0.00541
+spin_pop of  0 H 3s       -0.00632
+spin_pop of  0 H 2px       0.94252
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.05748
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.67811 | 0.66638   
+pop of  0 H 2s        0.18319 | 0.18860   
+pop of  0 H 3s        0.13870 | 0.14502   
+pop of  0 H 2px       0.94252 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.05748 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00875473836339414
+Init E_corr(CCSD) = -0.00875473836339737
+cycle = 1  E_corr(CCSD) = -0.00999702045096833  dE = -0.00124228209  norm(t1,t2) = 0.00574968
+cycle = 2  E_corr(CCSD) = -0.0101835391841297  dE = -0.000186518733  norm(t1,t2) = 0.00123133
+cycle = 3  E_corr(CCSD) = -0.0102241436960282  dE = -4.06045119e-05  norm(t1,t2) = 0.000343313
+cycle = 4  E_corr(CCSD) = -0.0102207857441817  dE = 3.35795185e-06  norm(t1,t2) = 3.76251e-05
+cycle = 5  E_corr(CCSD) = -0.0102208383478268  dE = -5.26036451e-08  norm(t1,t2) = 2.33508e-06
+UCCSD converged
+E(UCCSD) = -9.416640709244698  E_corr = -0.01022083834782683
+UCCSD(T) correction = -1.5256727497476e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000120135
+cycle = 2  norm(lambda1,lambda2) = 3.7214e-05
+cycle = 3  norm(lambda1,lambda2) = 1.24935e-05
+cycle = 4  norm(lambda1,lambda2) = 4.54944e-07
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -3.84820613076504
+
+WARN: alpha nocc = 2  HOMO -1.48177672329987 >= LUMO -1.48177672329987
+
+  beta  nocc = 1  HOMO = -4.83506517265333  LUMO = -1.48177672329987
+
+WARN: system HOMO -1.48177672329987 >= system LUMO -1.48177672329987
+
+cycle= 1 E= -10.2983165429444  delta_E= -6.45  |g|= 0.21  |ddm|=  2.8
+  alpha nocc = 2  HOMO = -0.743506649736647  LUMO = -0.348181153786738
+  beta  nocc = 1  HOMO = -3.55662516851  LUMO = -0.316056466900989
+cycle= 2 E= -10.3470580513593  delta_E= -0.0487  |g|= 0.0641  |ddm|= 0.338
+  alpha nocc = 2  HOMO = -0.768458652843844  LUMO = -0.382151389386243
+  beta  nocc = 1  HOMO = -3.66112712489581  LUMO = -0.331193080278287
+cycle= 3 E= -10.3528020949492  delta_E= -0.00574  |g|= 0.0058  |ddm|= 0.136
+  alpha nocc = 2  HOMO = -0.760557813689358  LUMO = -0.384889499241717
+  beta  nocc = 1  HOMO = -3.67165643519802  LUMO = -0.333130018564568
+cycle= 4 E= -10.3528366179048  delta_E= -3.45e-05  |g|= 8.71e-05  |ddm|= 0.012
+  alpha nocc = 2  HOMO = -0.761591824159259  LUMO = -0.384872172800585
+  beta  nocc = 1  HOMO = -3.67149706010525  LUMO = -0.333043687334467
+cycle= 5 E= -10.3528366215879  delta_E= -3.68e-09  |g|= 5.11e-06  |ddm|= 0.000144
+  alpha nocc = 2  HOMO = -0.761559441471006  LUMO = -0.384873875964169
+  beta  nocc = 1  HOMO = -3.67150362710479  LUMO = -0.333047490081504
+cycle= 6 E= -10.3528366215964  delta_E= -8.57e-12  |g|= 7.33e-07  |ddm|= 6.93e-06
+  alpha nocc = 2  HOMO = -0.761554321088955  LUMO = -0.384874054194212
+  beta  nocc = 1  HOMO = -3.67150457590785  LUMO = -0.333048012712329
+Extra cycle  E= -10.3528366215966  delta_E= -1.81e-13  |g|= 9.02e-08  |ddm|= 9.51e-07
+converged SCF energy = -10.3528366215966  <S^2> = 0.75016781  2S+1 = 2.0001678
+**** SCF Summaries ****
+Total Energy =                         -10.352836621596619
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -12.525787960062743
+Two-electron Energy =                    2.172951338466124
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -3.7468264391021   | -3.67150457590785  occ= 1 | 1
+MO #2   energy= -0.761554321088955 | -0.333048012712329 occ= 1 | 0
+MO #3   energy= -0.384874054194212 | -0.313776190016369 occ= 0 | 0
+MO #4   energy= -0.339340292995167 | -0.313776190016369 occ= 0 | 0
+MO #5   energy= -0.339340292995167 | -0.264643761044099 occ= 0 | 0
+MO #6   energy= -0.111726219450892 | -0.102956784142496 occ= 0 | 0
+MO #7   energy= 0.294822392804887  | 0.371552653053912  occ= 0 | 0
+MO #8   energy= 0.355769170286459  | 0.371552653053912  occ= 0 | 0
+MO #9   energy= 0.355769170286459  | 0.421003391559991  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01204
+spin_pop of  0 H 2s       -0.00542
+spin_pop of  0 H 3s       -0.00662
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.98074
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.01926
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.66847 | 0.65643   
+pop of  0 H 2s        0.18778 | 0.19320   
+pop of  0 H 3s        0.14376 | 0.15038   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.98074 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.01926 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.0079644678070945
+Init E_corr(CCSD) = -0.00796446780709697
+cycle = 1  E_corr(CCSD) = -0.00905630023536802  dE = -0.00109183243  norm(t1,t2) = 0.00523896
+cycle = 2  E_corr(CCSD) = -0.00921601134404337  dE = -0.000159711109  norm(t1,t2) = 0.00113617
+cycle = 3  E_corr(CCSD) = -0.00925043235202172  dE = -3.4421008e-05  norm(t1,t2) = 0.000323203
+cycle = 4  E_corr(CCSD) = -0.0092473111834252  dE = 3.1211686e-06  norm(t1,t2) = 3.51199e-05
+cycle = 5  E_corr(CCSD) = -0.00924736257103629  dE = -5.13876111e-08  norm(t1,t2) = 2.30303e-06
+UCCSD converged
+E(UCCSD) = -10.36208398416766  E_corr = -0.009247362571036295
+UCCSD(T) correction = -1.17716868812626e-06
+cycle = 1  norm(lambda1,lambda2) = 0.000102276
+cycle = 2  norm(lambda1,lambda2) = 3.23235e-05
+cycle = 3  norm(lambda1,lambda2) = 1.09537e-05
+cycle = 4  norm(lambda1,lambda2) = 3.43455e-07
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -4.11922237789583
+
+WARN: alpha nocc = 2  HOMO -1.68850640923078 >= LUMO -1.68850640923078
+
+  beta  nocc = 1  HOMO = -5.22735324631055  LUMO = -1.68850640923078
+
+WARN: system HOMO -1.68850640923078 >= system LUMO -1.68850640923078
+
+cycle= 1 E= -11.2730288560725  delta_E= -7.15  |g|= 0.199  |ddm|= 2.86
+  alpha nocc = 2  HOMO = -0.922769352875666  LUMO = -0.446591172716925
+  beta  nocc = 1  HOMO = -3.93133544897465  LUMO = -0.414601588596852
+cycle= 2 E= -11.3108664014714  delta_E= -0.0378  |g|= 0.0552  |ddm|= 0.307
+  alpha nocc = 2  HOMO = -0.940367402264064  LUMO = -0.473670457780335
+  beta  nocc = 1  HOMO = -4.00942148492079  LUMO = -0.438970272684916
+cycle= 3 E= -11.3148910113438  delta_E= -0.00402  |g|= 0.00603  |ddm|= 0.111
+  alpha nocc = 2  HOMO = -0.935670262013732  LUMO = -0.477015015657793
+  beta  nocc = 1  HOMO = -4.0209588596533  LUMO = -0.444273290426016
+cycle= 4 E= -11.3149314491031  delta_E= -4.04e-05  |g|= 7.45e-05  |ddm|= 0.0125
+  alpha nocc = 2  HOMO = -0.936254457160615  LUMO = -0.476962411610855
+  beta  nocc = 1  HOMO = -4.02074040780202  LUMO = -0.444141020605001
+cycle= 5 E= -11.3149314518332  delta_E= -2.73e-09  |g|= 3.7e-06  |ddm|= 0.000119
+  alpha nocc = 2  HOMO = -0.936232686495218  LUMO = -0.476965262256987
+  beta  nocc = 1  HOMO = -4.02075012364459  LUMO = -0.444147542521783
+cycle= 6 E= -11.3149314518374  delta_E= -4.2e-12  |g|= 7.23e-07  |ddm|= 4.19e-06
+  alpha nocc = 2  HOMO = -0.936228061469792  LUMO = -0.47696582176436
+  beta  nocc = 1  HOMO = -4.02075216270656  LUMO = -0.444148887251399
+Extra cycle  E= -11.3149314518376  delta_E= -1.65e-13  |g|= 8.4e-08  |ddm|= 8.87e-07
+converged SCF energy = -11.3149314518376  <S^2> = 0.75016749  2S+1 = 2.0001675
+**** SCF Summaries ****
+Total Energy =                         -11.314931451837586
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -13.563099238463121
+Two-electron Energy =                    2.248167786625535
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -4.10978350523564  | -4.02075216270656  occ= 1 | 1
+MO #2   energy= -0.936228061469792 | -0.444148887251399 occ= 1 | 0
+MO #3   energy= -0.47696582176436  | -0.444148887251399 occ= 0 | 0
+MO #4   energy= -0.472650221909933 | -0.428601057011501 occ= 0 | 0
+MO #5   energy= -0.472650221909933 | -0.389750171180047 occ= 0 | 0
+MO #6   energy= -0.163059500469861 | -0.156534990272301 occ= 0 | 0
+MO #7   energy= 0.148699281190825  | 0.220979883289771  occ= 0 | 0
+MO #8   energy= 0.205589188644127  | 0.220979883289771  occ= 0 | 0
+MO #9   energy= 0.205589188644127  | 0.270217384215468  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01208
+spin_pop of  0 H 2s       -0.00531
+spin_pop of  0 H 3s       -0.00676
+spin_pop of  0 H 2px       0.99838
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00162
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.66007 | 0.64799   
+pop of  0 H 2s        0.19175 | 0.19707   
+pop of  0 H 3s        0.14818 | 0.15494   
+pop of  0 H 2px       0.99838 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00162 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00725629127137775
+Init E_corr(CCSD) = -0.00725629127137992
+cycle = 1  E_corr(CCSD) = -0.00822105285518031  dE = -0.000964761584  norm(t1,t2) = 0.00475637
+cycle = 2  E_corr(CCSD) = -0.00835850588385439  dE = -0.000137453029  norm(t1,t2) = 0.0010091
+cycle = 3  E_corr(CCSD) = -0.0083872092640535  dE = -2.87033802e-05  norm(t1,t2) = 0.00028061
+cycle = 4  E_corr(CCSD) = -0.00838464280928732  dE = 2.56645477e-06  norm(t1,t2) = 2.96759e-05
+cycle = 5  E_corr(CCSD) = -0.00838468591320305  dE = -4.31039157e-08  norm(t1,t2) = 1.90023e-06
+UCCSD converged
+E(UCCSD) = -11.32331613775079  E_corr = -0.008384685913203047
+UCCSD(T) correction = -8.828252420332e-07
+cycle = 1  norm(lambda1,lambda2) = 8.38691e-05
+cycle = 2  norm(lambda1,lambda2) = 2.60917e-05
+cycle = 3  norm(lambda1,lambda2) = 8.65549e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -4.39023862502661
+
+WARN: alpha nocc = 2  HOMO -1.90059828004043 >= LUMO -1.90059828004043
+
+  beta  nocc = 1  HOMO = -5.62021350313318  LUMO = -1.90059828004043
+
+WARN: system HOMO -1.90059828004043 >= system LUMO -1.90059828004043
+
+cycle= 1 E= -12.2592438372755  delta_E= -7.87  |g|= 0.19  |ddm|= 2.91
+  alpha nocc = 2  HOMO = -1.11415403350138  LUMO = -0.589218416290739
+  beta  nocc = 1  HOMO = -4.31152943744958  LUMO = -0.557894272403674
+cycle= 2 E= -12.28821881754  delta_E= -0.029  |g|= 0.0465  |ddm|= 0.275
+  alpha nocc = 2  HOMO = -1.12619684872265  LUMO = -0.615918119271117
+  beta  nocc = 1  HOMO = -4.36804359521292  LUMO = -0.583457093993752
+cycle= 3 E= -12.2908346797807  delta_E= -0.00262  |g|= 0.00571  |ddm|= 0.0876
+  alpha nocc = 2  HOMO = -1.12358363243072  LUMO = -0.620502332657653
+  beta  nocc = 1  HOMO = -4.3780425931852  LUMO = -0.588461702018169
+cycle= 4 E= -12.2908705078527  delta_E= -3.58e-05  |g|= 6e-05  |ddm|= 0.0115
+  alpha nocc = 2  HOMO = -1.12389773138601  LUMO = -0.620390887529465
+  beta  nocc = 1  HOMO = -4.37786902486207  LUMO = -0.588351063708984
+cycle= 5 E= -12.2908705095014  delta_E= -1.65e-09  |g|= 2.43e-06  |ddm|= 9.23e-05
+  alpha nocc = 2  HOMO = -1.12388714733108  LUMO = -0.620395059346951
+  beta  nocc = 1  HOMO = -4.37787597061898  LUMO = -0.588355854850943
+cycle= 6 E= -12.290870509503  delta_E= -1.61e-12  |g|= 8.59e-07  |ddm|= 2.07e-06
+  alpha nocc = 2  HOMO = -1.1238820320334  LUMO = -0.62039706180232
+  beta  nocc = 1  HOMO = -4.37787935572179  LUMO = -0.588358165367554
+Extra cycle  E= -12.2908705095032  delta_E= -2.17e-13  |g|= 9.69e-08  |ddm|= 1e-06
+converged SCF energy = -12.2908705095032  <S^2> = 0.75015976  2S+1 = 2.0001598
+**** SCF Summaries ****
+Total Energy =                         -12.290870509503216
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -14.601365199788614
+Two-electron Energy =                    2.310494690285397
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -4.4786145226945   | -4.37787935572179  occ= 1 | 1
+MO #2   energy= -1.1238820320334   | -0.588358165367554 occ= 1 | 0
+MO #3   energy= -0.62039706180232  | -0.588358165367554 occ= 0 | 0
+MO #4   energy= -0.62039706180232  | -0.528024961166528 occ= 0 | 0
+MO #5   energy= -0.572546932506238 | -0.527408365370197 occ= 0 | 0
+MO #6   energy= -0.212762121082257 | -0.207689066534378 occ= 0 | 0
+MO #7   energy= 0.0155757586220509 | 0.0771816504726147 occ= 0 | 0
+MO #8   energy= 0.0632862228394068 | 0.0771816504726155 occ= 0 | 0
+MO #9   energy= 0.063286222839407  | 0.123957589016508  occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01182
+spin_pop of  0 H 2s       -0.00509
+spin_pop of  0 H 3s       -0.00674
+spin_pop of  0 H 2px       0.99769
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00231
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.65266 | 0.64084   
+pop of  0 H 2s        0.19525 | 0.20034   
+pop of  0 H 3s        0.15209 | 0.15882   
+pop of  0 H 2px       0.99769 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00231 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00665260394022461
+Init E_corr(CCSD) = -0.00665260394022779
+cycle = 1  E_corr(CCSD) = -0.00751190733876258  dE = -0.000859303399  norm(t1,t2) = 0.00430577
+cycle = 2  E_corr(CCSD) = -0.0076308250223077  dE = -0.000118917684  norm(t1,t2) = 0.000867253
+cycle = 3  E_corr(CCSD) = -0.00765442194435689  dE = -2.3596922e-05  norm(t1,t2) = 0.000227793
+cycle = 4  E_corr(CCSD) = -0.00765250215170492  dE = 1.91979265e-06  norm(t1,t2) = 2.31029e-05
+cycle = 5  E_corr(CCSD) = -0.00765253339929256  dE = -3.12475876e-08  norm(t1,t2) = 1.39085e-06
+UCCSD converged
+E(UCCSD) = -12.29852304290251  E_corr = -0.007652533399292565
+UCCSD(T) correction = -6.50426296407955e-07
+cycle = 1  norm(lambda1,lambda2) = 6.68696e-05
+cycle = 2  norm(lambda1,lambda2) = 1.98539e-05
+cycle = 3  norm(lambda1,lambda2) = 6.28885e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -4.6612548721574
+
+WARN: alpha nocc = 2  HOMO -2.11670560719785 >= LUMO -2.11670560719785
+
+  beta  nocc = 1  HOMO = -6.01354005295147  LUMO = -2.11670560719785
+
+WARN: system HOMO -2.11670560719785 >= system LUMO -2.11670560719785
+
+cycle= 1 E= -13.2540209588993  delta_E= -8.59  |g|= 0.183  |ddm|= 2.96
+  alpha nocc = 2  HOMO = -1.31497701013738  LUMO = -0.758904982257885
+  beta  nocc = 1  HOMO = -4.69578161216306  LUMO = -0.723557878845755
+cycle= 2 E= -13.2763458005893  delta_E= -0.0223  |g|= 0.039  |ddm|= 0.247
+  alpha nocc = 2  HOMO = -1.32332313007748  LUMO = -0.780115782115161
+  beta  nocc = 1  HOMO = -4.73636707712956  LUMO = -0.744055106267614
+cycle= 3 E= -13.2779810611292  delta_E= -0.00164  |g|= 0.00502  |ddm|= 0.0676
+  alpha nocc = 2  HOMO = -1.32188922993467  LUMO = -0.783926283967898
+  beta  nocc = 1  HOMO = -4.74402108964844  LUMO = -0.748217462728818
+cycle= 4 E= -13.2780072638741  delta_E= -2.62e-05  |g|= 4.71e-05  |ddm|= 0.00959
+  alpha nocc = 2  HOMO = -1.32205589519366  LUMO = -0.783845343144817
+  beta  nocc = 1  HOMO = -4.74390735257529  LUMO = -0.748137115222546
+cycle= 5 E= -13.2780072647897  delta_E= -9.16e-10  |g|= 1.58e-06  |ddm|= 6.89e-05
+  alpha nocc = 2  HOMO = -1.32204280571389  LUMO = -0.783852504367763
+  beta  nocc = 1  HOMO = -4.74391821624818  LUMO = -0.748145292987744
+cycle= 6 E= -13.2780072647902  delta_E= -5.49e-13  |g|= 7.65e-07  |ddm|= 2.94e-06
+  alpha nocc = 2  HOMO = -1.32204749252511  LUMO = -0.783849839429633
+  beta  nocc = 1  HOMO = -4.74391421683917  LUMO = -0.748142309525681
+Extra cycle  E= -13.2780072647904  delta_E= -1.76e-13  |g|= 8.93e-08  |ddm|= 8.45e-07
+converged SCF energy = -13.2780072647904  <S^2> = 0.75014732  2S+1 = 2.0001473
+**** SCF Summaries ****
+Total Energy =                         -13.278007264790403
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                  -15.636184139192073
+Two-electron Energy =                    2.358176874401670
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -4.85386858100001  | -4.74391421683917  occ= 1 | 1
+MO #2   energy= -1.32204749252511  | -0.748142309525681 occ= 1 | 0
+MO #3   energy= -0.783849839429633 | -0.748142309525681 occ= 0 | 0
+MO #4   energy= -0.783849839429633 | -0.680098979817854 occ= 0 | 0
+MO #5   energy= -0.671610406772533 | -0.630596728110206 occ= 0 | 0
+MO #6   energy= -0.261427842316085 | -0.257335065155843 occ= 0 | 0
+MO #7   energy= -0.10699663474396  | -0.058884237026987 occ= 0 | 0
+MO #8   energy= -0.0706197794986765 | -0.0588842370269869 occ= 0 | 0
+MO #9   energy= -0.0706197794986764 | -0.0161484444889529 occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.01138
+spin_pop of  0 H 2s       -0.00479
+spin_pop of  0 H 3s       -0.00658
+spin_pop of  0 H 2px       0.98494
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.01506
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.64613 | 0.63475   
+pop of  0 H 2s        0.19832 | 0.20311   
+pop of  0 H 3s        0.15555 | 0.16213   
+pop of  0 H 2px       0.98494 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.01506 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00615297649679821
+Init E_corr(CCSD) = -0.00615297649680152
+cycle = 1  E_corr(CCSD) = -0.00692506404111885  dE = -0.000772087544  norm(t1,t2) = 0.0038989
+cycle = 2  E_corr(CCSD) = -0.0070285312169818  dE = -0.000103467176  norm(t1,t2) = 0.000732812
+cycle = 3  E_corr(CCSD) = -0.00704782814753823  dE = -1.92969306e-05  norm(t1,t2) = 0.000177868
+cycle = 4  E_corr(CCSD) = -0.00704647568350265  dE = 1.35246404e-06  norm(t1,t2) = 1.70001e-05
+cycle = 5  E_corr(CCSD) = -0.00704649606847606  dE = -2.03849734e-08  norm(t1,t2) = 9.46966e-07
+UCCSD converged
+E(UCCSD) = -13.28505376085888  E_corr = -0.007046496068476059
+UCCSD(T) correction = -4.7697757369806e-07
+cycle = 1  norm(lambda1,lambda2) = 5.26514e-05
+cycle = 2  norm(lambda1,lambda2) = 1.45831e-05
+cycle = 3  norm(lambda1,lambda2) = 4.33492e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 162 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.324994918064823
+  alpha nocc = 2  HOMO = 0.085668319491656  LUMO = 0.310428168955641
+  beta  nocc = 1  HOMO = -0.184578152068417  LUMO = 0.085668319491656
+
+WARN: system HOMO 0.085668319491656 >= system LUMO 0.085668319491656
+
+cycle= 1 E= -0.163651356011079  delta_E= 0.161  |g|= 0.148  |ddm|= 2.57
+  alpha nocc = 2  HOMO = 0.312304493217549  LUMO = 0.807238006470106
+  beta  nocc = 1  HOMO = 0.229414592528307  LUMO = 0.460286419508782
+cycle= 2 E= -0.210468395638365  delta_E= -0.0468  |g|= 0.0504  |ddm|= 0.592
+  alpha nocc = 2  HOMO = 0.270440431319114  LUMO = 0.74772191834038
+  beta  nocc = 1  HOMO = 0.174435793564143  LUMO = 0.478428675125981
+cycle= 3 E= -0.223532127472487  delta_E= -0.0131  |g|= 0.0424  |ddm|= 0.292
+  alpha nocc = 2  HOMO = 0.239201722961592  LUMO = 0.677332116784152
+  beta  nocc = 1  HOMO = 0.158629213437408  LUMO = 0.54799967048086
+cycle= 4 E= -0.235448510627965  delta_E= -0.0119  |g|= 0.0168  |ddm|= 0.911
+  alpha nocc = 2  HOMO = 0.244699854077606  LUMO = 0.695869919569099
+  beta  nocc = 1  HOMO = 0.183166497043201  LUMO = 0.516717802319122
+cycle= 5 E= -0.236026581566385  delta_E= -0.000578  |g|= 0.00275  |ddm|= 0.136
+  alpha nocc = 2  HOMO = 0.244465360222165  LUMO = 0.695325784712296
+  beta  nocc = 1  HOMO = 0.187083960782704  LUMO = 0.512585675898398
+cycle= 6 E= -0.236033985103193  delta_E= -7.4e-06  |g|= 0.0012  |ddm|= 0.0195
+  alpha nocc = 2  HOMO = 0.245056771695203  LUMO = 0.696847803639669
+  beta  nocc = 1  HOMO = 0.18918807572686  LUMO = 0.509660225803887
+cycle= 7 E= -0.236037145533215  delta_E= -3.16e-06  |g|= 0.00049  |ddm|= 0.0145
+  alpha nocc = 2  HOMO = 0.244865218370675  LUMO = 0.696353340202227
+  beta  nocc = 1  HOMO = 0.188246056469321  LUMO = 0.510895365090284
+cycle= 8 E= -0.236037565912608  delta_E= -4.2e-07  |g|= 0.000166  |ddm|= 0.00458
+  alpha nocc = 2  HOMO = 0.244902325816258  LUMO = 0.696450883898573
+  beta  nocc = 1  HOMO = 0.188456171506846  LUMO = 0.510628270946076
+cycle= 9 E= -0.236037612595382  delta_E= -4.67e-08  |g|= 2.8e-05  |ddm|= 0.000879
+  alpha nocc = 2  HOMO = 0.244905570256271  LUMO = 0.696459408257091
+  beta  nocc = 1  HOMO = 0.188474788236432  LUMO = 0.510604658179456
+cycle= 10 E= -0.236037613517889  delta_E= -9.23e-10  |g|= 1.58e-05  |ddm|= 7.68e-05
+  alpha nocc = 2  HOMO = 0.244906888289795  LUMO = 0.696462871194967
+  beta  nocc = 1  HOMO = 0.188482383017906  LUMO = 0.510595031981293
+cycle= 11 E= -0.236037613746149  delta_E= -2.28e-10  |g|= 1.09e-05  |ddm|= 3.12e-05
+  alpha nocc = 2  HOMO = 0.244907596781855  LUMO = 0.696464732690324
+  beta  nocc = 1  HOMO = 0.188486477437535  LUMO = 0.51058984493299
+cycle= 12 E= -0.23603761383376  delta_E= -8.76e-11  |g|= 8.19e-06  |ddm|= 1.68e-05
+  alpha nocc = 2  HOMO = 0.244908036070595  LUMO = 0.696465886908771
+  beta  nocc = 1  HOMO = 0.188489021915446  LUMO = 0.510586622667348
+cycle= 13 E= -0.236037613875732  delta_E= -4.2e-11  |g|= 6.53e-06  |ddm|= 1.04e-05
+  alpha nocc = 2  HOMO = 0.244908333237671  LUMO = 0.696466667745929
+  beta  nocc = 1  HOMO = 0.188490746853528  LUMO = 0.510584439036915
+cycle= 14 E= -0.236037613898757  delta_E= -2.3e-11  |g|= 5.4e-06  |ddm|= 7.04e-06
+  alpha nocc = 2  HOMO = 0.244908547572053  LUMO = 0.69646723090945
+  beta  nocc = 1  HOMO = 0.188491992251928  LUMO = 0.510582862702891
+cycle= 15 E= -0.236037613912668  delta_E= -1.39e-11  |g|= 4.59e-06  |ddm|= 5.07e-06
+  alpha nocc = 2  HOMO = 0.244908708519772  LUMO = 0.696467653816948
+  beta  nocc = 1  HOMO = 0.188492928945985  LUMO = 0.510581677426519
+cycle= 16 E= -0.236037613921629  delta_E= -8.96e-12  |g|= 3.98e-06  |ddm|= 3.81e-06
+  alpha nocc = 2  HOMO = 0.244908833759082  LUMO = 0.696467982893801
+  beta  nocc = 1  HOMO = 0.188493658545077  LUMO = 0.510580754348147
+cycle= 17 E= -0.236037613927718  delta_E= -6.09e-12  |g|= 3.5e-06  |ddm|= 2.97e-06
+  alpha nocc = 2  HOMO = 0.244909850905696  LUMO = 0.696470654229799
+  beta  nocc = 1  HOMO = 0.18849943740296  LUMO = 0.510573412418399
+cycle= 18 E= -0.236037613948469  delta_E= -2.08e-11  |g|= 2.92e-07  |ddm|= 2.41e-05
+  alpha nocc = 2  HOMO = 0.244909788276398  LUMO = 0.696470454749885
+  beta  nocc = 1  HOMO = 0.188499023312358  LUMO = 0.510573830767239
+Extra cycle  E= -0.236037613948594  delta_E= -1.25e-13  |g|= 1.43e-07  |ddm|= 8.83e-07
+converged SCF energy = -0.236037613948594  <S^2> = 0.75815028  2S+1 = 2.0081337
+**** SCF Summaries ****
+Total Energy =                          -0.236037613948594
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.872250565895143
+Two-electron Energy =                    0.636212951946549
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0332334213085604 | 0.188499023312358  occ= 1 | 1
+MO #2   energy= 0.244909788276398  | 0.510573830767239  occ= 1 | 0
+MO #3   energy= 0.696470454749885  | 0.712778541173819  occ= 0 | 0
+MO #4   energy= 0.696470454749885  | 0.712778541173819  occ= 0 | 0
+MO #5   energy= 0.696470454749885  | 0.712778541173819  occ= 0 | 0
+MO #6   energy= 1.1403480872565    | 1.29615926009583   occ= 0 | 0
+MO #7   energy= 2.21241653895761   | 2.30805597707914   occ= 0 | 0
+MO #8   energy= 2.21241653895761   | 2.30805597707914   occ= 0 | 0
+MO #9   energy= 2.21241653895761   | 2.30805597707914   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.64807
+spin_pop of  0 H 2s        0.12745
+spin_pop of  0 H 3s        0.22448
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.98991 | 0.34184   
+pop of  0 H 2s        0.67281 | 0.54536   
+pop of  0 H 3s        0.33728 | 0.11280   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 162 MB)
+Init t2, MP2 energy = -0.00991993307307729
+Init E_corr(CCSD) = -0.0099199330731039
+cycle = 1  E_corr(CCSD) = -0.0127725195701794  dE = -0.0028525865  norm(t1,t2) = 0.0479738
+cycle = 2  E_corr(CCSD) = -0.0143408953481259  dE = -0.00156837578  norm(t1,t2) = 0.0356458
+cycle = 3  E_corr(CCSD) = -0.0178649671504898  dE = -0.0035240718  norm(t1,t2) = 0.0260984
+cycle = 4  E_corr(CCSD) = -0.0174864950909253  dE = 0.00037847206  norm(t1,t2) = 0.00278568
+cycle = 5  E_corr(CCSD) = -0.0175755008266581  dE = -8.90057357e-05  norm(t1,t2) = 0.000741969
+cycle = 6  E_corr(CCSD) = -0.0175660335890179  dE = 9.46723764e-06  norm(t1,t2) = 8.78519e-05
+cycle = 7  E_corr(CCSD) = -0.0175650138905502  dE = 1.01969847e-06  norm(t1,t2) = 8.59351e-06
+cycle = 8  E_corr(CCSD) = -0.0175653298124991  dE = -3.15921949e-07  norm(t1,t2) = 3.50731e-06
+cycle = 9  E_corr(CCSD) = -0.0175653637451307  dE = -3.39326316e-08  norm(t1,t2) = 3.45182e-07
+UCCSD converged
+E(UCCSD) = -0.2536029776937246  E_corr = -0.01756536374513071
+UCCSD(T) correction = -1.91698279170616e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00988432
+cycle = 2  norm(lambda1,lambda2) = 0.00317011
+cycle = 3  norm(lambda1,lambda2) = 0.00114311
+cycle = 4  norm(lambda1,lambda2) = 0.000243238
+cycle = 5  norm(lambda1,lambda2) = 7.4064e-05
+cycle = 6  norm(lambda1,lambda2) = 9.00305e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 163 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.335835567950055
+  alpha nocc = 2  HOMO = 0.0830257144123863  LUMO = 0.306536422144883
+  beta  nocc = 1  HOMO = -0.193202614459669  LUMO = 0.0830257144123863
+
+WARN: system HOMO 0.0830257144123863 >= system LUMO 0.0830257144123863
+
+cycle= 1 E= -0.180240264738518  delta_E= 0.156  |g|= 0.148  |ddm|= 2.55
+  alpha nocc = 2  HOMO = 0.308886809668973  LUMO = 0.805055744930928
+  beta  nocc = 1  HOMO = 0.225571210467256  LUMO = 0.456527899083672
+cycle= 2 E= -0.226279287908529  delta_E= -0.046  |g|= 0.0492  |ddm|= 0.591
+  alpha nocc = 2  HOMO = 0.268613907029013  LUMO = 0.747018433558945
+  beta  nocc = 1  HOMO = 0.170727683540393  LUMO = 0.473686412196886
+cycle= 3 E= -0.238753408123148  delta_E= -0.0125  |g|= 0.0417  |ddm|= 0.279
+  alpha nocc = 2  HOMO = 0.237800106414132  LUMO = 0.677277226916766
+  beta  nocc = 1  HOMO = 0.155604770132728  LUMO = 0.54279099596174
+cycle= 4 E= -0.250646098830664  delta_E= -0.0119  |g|= 0.0161  |ddm|= 0.902
+  alpha nocc = 2  HOMO = 0.243071705528069  LUMO = 0.695263142779839
+  beta  nocc = 1  HOMO = 0.180467601811271  LUMO = 0.511271075109182
+cycle= 5 E= -0.251176163475079  delta_E= -0.00053  |g|= 0.00248  |ddm|= 0.132
+  alpha nocc = 2  HOMO = 0.242715376427615  LUMO = 0.694385423276204
+  beta  nocc = 1  HOMO = 0.184158099105361  LUMO = 0.507553795988005
+cycle= 6 E= -0.251182114979726  delta_E= -5.95e-06  |g|= 0.00118  |ddm|= 0.0214
+  alpha nocc = 2  HOMO = 0.243243824984281  LUMO = 0.695745719948299
+  beta  nocc = 1  HOMO = 0.186068211436862  LUMO = 0.504882072673178
+cycle= 7 E= -0.251185461102095  delta_E= -3.35e-06  |g|= 0.000357  |ddm|= 0.0133
+  alpha nocc = 2  HOMO = 0.242775708272401  LUMO = 0.69451732852948
+  beta  nocc = 1  HOMO = 0.183201105171784  LUMO = 0.508512288650787
+cycle= 8 E= -0.251181910012134  delta_E= 3.55e-06  |g|= 0.00149  |ddm|= 0.0115
+  alpha nocc = 2  HOMO = 0.243167435370207  LUMO = 0.695549133498319
+  beta  nocc = 1  HOMO = 0.185660242338896  LUMO = 0.505413525530883
+cycle= 9 E= -0.251185682695399  delta_E= -3.77e-06  |g|= 8.07e-05  |ddm|= 0.0096
+  alpha nocc = 2  HOMO = 0.24316064041329  LUMO = 0.695531382689117
+  beta  nocc = 1  HOMO = 0.185618158094943  LUMO = 0.505466679988223
+cycle= 10 E= -0.251185688913738  delta_E= -6.22e-09  |g|= 5.38e-05  |ddm|= 0.000166
+  alpha nocc = 2  HOMO = 0.243157277212686  LUMO = 0.695522595107429
+  beta  nocc = 1  HOMO = 0.185597310091818  LUMO = 0.505493007987564
+cycle= 11 E= -0.251185691070949  delta_E= -2.16e-09  |g|= 4.04e-05  |ddm|= 8.23e-05
+  alpha nocc = 2  HOMO = 0.243155255609989  LUMO = 0.695517312395831
+  beta  nocc = 1  HOMO = 0.185584771546684  LUMO = 0.505508840813319
+cycle= 12 E= -0.25118569207401  delta_E= -1e-09  |g|= 3.24e-05  |ddm|= 4.95e-05
+  alpha nocc = 2  HOMO = 0.2431539032588  LUMO = 0.695513778292804
+  beta  nocc = 1  HOMO = 0.185576380263349  LUMO = 0.505519435950356
+cycle= 13 E= -0.251185692621865  delta_E= -5.48e-10  |g|= 2.71e-05  |ddm|= 3.31e-05
+  alpha nocc = 2  HOMO = 0.243152934020296  LUMO = 0.695511245277176
+  beta  nocc = 1  HOMO = 0.18557036443455  LUMO = 0.505527031371303
+cycle= 14 E= -0.251185692953752  delta_E= -3.32e-10  |g|= 2.32e-05  |ddm|= 2.37e-05
+  alpha nocc = 2  HOMO = 0.243152205056477  LUMO = 0.695509340138405
+  beta  nocc = 1  HOMO = 0.185565838745049  LUMO = 0.505532745121126
+cycle= 15 E= -0.251185693169927  delta_E= -2.16e-10  |g|= 2.03e-05  |ddm|= 1.78e-05
+  alpha nocc = 2  HOMO = 0.243151636769931  LUMO = 0.695507854895897
+  beta  nocc = 1  HOMO = 0.185562309879091  LUMO = 0.505537200208634
+cycle= 16 E= -0.251185693318533  delta_E= -1.49e-10  |g|= 1.81e-05  |ddm|= 1.39e-05
+  alpha nocc = 2  HOMO = 0.243151181337282  LUMO = 0.695506664578202
+  beta  nocc = 1  HOMO = 0.185559481181137  LUMO = 0.50554077121836
+cycle= 17 E= -0.251185693425029  delta_E= -1.06e-10  |g|= 1.63e-05  |ddm|= 1.11e-05
+  alpha nocc = 2  HOMO = 0.243147079964073  LUMO = 0.69549594195653
+  beta  nocc = 1  HOMO = 0.185533971754621  LUMO = 0.505572969524518
+cycle= 18 E= -0.251185693878494  delta_E= -4.53e-10  |g|= 3.43e-08  |ddm|= 0.0001
+  alpha nocc = 2  HOMO = 0.243147086689873  LUMO = 0.695495966941633
+  beta  nocc = 1  HOMO = 0.185534034067855  LUMO = 0.505572904362355
+Extra cycle  E= -0.251185693878495  delta_E= -1.33e-15  |g|= 1.59e-08  |ddm|= 1.09e-07
+converged SCF energy = -0.251185693878495  <S^2> = 0.75868592  2S+1 = 2.0086671
+**** SCF Summaries ****
+Total Energy =                          -0.251185693878495
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.892943723610405
+Two-electron Energy =                    0.641758029731910
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0381087879992547 | 0.185534034067855  occ= 1 | 1
+MO #2   energy= 0.243147086689873  | 0.505572904362355  occ= 1 | 0
+MO #3   energy= 0.695495966941633  | 0.710843398419316  occ= 0 | 0
+MO #4   energy= 0.695495966941633  | 0.710843398419316  occ= 0 | 0
+MO #5   energy= 0.695495966941633  | 0.710843398419316  occ= 0 | 0
+MO #6   energy= 1.13376449038678   | 1.28865690196249   occ= 0 | 0
+MO #7   energy= 2.2097464344501    | 2.30509636804571   occ= 0 | 0
+MO #8   energy= 2.2097464344501    | 2.30509636804571   occ= 0 | 0
+MO #9   energy= 2.2097464344501    | 2.30509636804571   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.63622
+spin_pop of  0 H 2s        0.13701
+spin_pop of  0 H 3s        0.22677
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.99094 | 0.35472   
+pop of  0 H 2s        0.67377 | 0.53676   
+pop of  0 H 3s        0.33529 | 0.10852   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 163 MB)
+Init t2, MP2 energy = -0.0102767041363309
+Init E_corr(CCSD) = -0.0102767041363312
+cycle = 1  E_corr(CCSD) = -0.0132380861439793  dE = -0.00296138201  norm(t1,t2) = 0.0486944
+cycle = 2  E_corr(CCSD) = -0.0148591044607438  dE = -0.00162101832  norm(t1,t2) = 0.0362753
+cycle = 3  E_corr(CCSD) = -0.0185068048635205  dE = -0.0036477004  norm(t1,t2) = 0.0265945
+cycle = 4  E_corr(CCSD) = -0.018103736245477  dE = 0.000403068618  norm(t1,t2) = 0.00291357
+cycle = 5  E_corr(CCSD) = -0.018201125862781  dE = -9.73896173e-05  norm(t1,t2) = 0.000797098
+cycle = 6  E_corr(CCSD) = -0.0181905023450697  dE = 1.06235177e-05  norm(t1,t2) = 9.46166e-05
+cycle = 7  E_corr(CCSD) = -0.0181894340171965  dE = 1.06832787e-06  norm(t1,t2) = 8.97967e-06
+cycle = 8  E_corr(CCSD) = -0.0181897620980533  dE = -3.28080857e-07  norm(t1,t2) = 3.60242e-06
+cycle = 9  E_corr(CCSD) = -0.018189793461643  dE = -3.13635897e-08  norm(t1,t2) = 3.13774e-07
+UCCSD converged
+E(UCCSD) = -0.2693754873401379  E_corr = -0.01818979346164304
+UCCSD(T) correction = -1.92423840110921e-05
+cycle = 1  norm(lambda1,lambda2) = 0.0102922
+cycle = 2  norm(lambda1,lambda2) = 0.0032946
+cycle = 3  norm(lambda1,lambda2) = 0.0011844
+cycle = 4  norm(lambda1,lambda2) = 0.000243874
+cycle = 5  norm(lambda1,lambda2) = 7.57706e-05
+cycle = 6  norm(lambda1,lambda2) = 9.94033e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 163 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.346676217835286
+  alpha nocc = 2  HOMO = 0.0804023620953893  LUMO = 0.30264196207163
+  beta  nocc = 1  HOMO = -0.201919389836909  LUMO = 0.0804023620953893
+
+WARN: system HOMO 0.0804023620953893 >= system LUMO 0.0804023620953893
+
+cycle= 1 E= -0.197011618313949  delta_E= 0.15  |g|= 0.149  |ddm|= 2.53
+  alpha nocc = 2  HOMO = 0.305462878884392  LUMO = 0.802843418926085
+  beta  nocc = 1  HOMO = 0.221622608633149  LUMO = 0.452844542938375
+cycle= 2 E= -0.242291191255088  delta_E= -0.0453  |g|= 0.0481  |ddm|= 0.59
+  alpha nocc = 2  HOMO = 0.266765667222313  LUMO = 0.746259291616022
+  beta  nocc = 1  HOMO = 0.166900001380358  LUMO = 0.469035417482775
+cycle= 3 E= -0.254173839572484  delta_E= -0.0119  |g|= 0.0409  |ddm|= 0.268
+  alpha nocc = 2  HOMO = 0.236516229339555  LUMO = 0.677614850661269
+  beta  nocc = 1  HOMO = 0.15280296019299  LUMO = 0.537148890453539
+cycle= 4 E= -0.265999125004456  delta_E= -0.0118  |g|= 0.0151  |ddm|= 0.889
+  alpha nocc = 2  HOMO = 0.241481983025054  LUMO = 0.694766109990709
+  beta  nocc = 1  HOMO = 0.177761058944936  LUMO = 0.505727511105257
+cycle= 5 E= -0.266467312626339  delta_E= -0.000468  |g|= 0.00219  |ddm|= 0.127
+  alpha nocc = 2  HOMO = 0.241013732527837  LUMO = 0.693578897959389
+  beta  nocc = 1  HOMO = 0.181169221069366  LUMO = 0.502486000900409
+cycle= 6 E= -0.266472148613319  delta_E= -4.84e-06  |g|= 0.00114  |ddm|= 0.0232
+  alpha nocc = 2  HOMO = 0.241466251108048  LUMO = 0.694741881398623
+  beta  nocc = 1  HOMO = 0.182833789709055  LUMO = 0.500145078659226
+cycle= 7 E= -0.266475503792044  delta_E= -3.36e-06  |g|= 0.000197  |ddm|= 0.0116
+  alpha nocc = 2  HOMO = 0.241456536177253  LUMO = 0.694715224149732
+  beta  nocc = 1  HOMO = 0.182710834499979  LUMO = 0.500286650375941
+cycle= 8 E= -0.266475535397396  delta_E= -3.16e-08  |g|= 0.000132  |ddm|= 0.000327
+  alpha nocc = 2  HOMO = 0.241452971744014  LUMO = 0.694705987399091
+  beta  nocc = 1  HOMO = 0.182685510583807  LUMO = 0.500318233703531
+cycle= 9 E= -0.266475541867038  delta_E= -6.47e-09  |g|= 0.000117  |ddm|= 9.12e-05
+  alpha nocc = 2  HOMO = 0.241450838193089  LUMO = 0.694700458172664
+  beta  nocc = 1  HOMO = 0.182670391418898  LUMO = 0.50033709693578
+cycle= 10 E= -0.266475545349508  delta_E= -3.48e-09  |g|= 0.000108  |ddm|= 5.46e-05
+  alpha nocc = 2  HOMO = 0.241449299342188  LUMO = 0.694696470093061
+  beta  nocc = 1  HOMO = 0.182659506862757  LUMO = 0.500350680811223
+cycle= 11 E= -0.266475547680382  delta_E= -2.33e-09  |g|= 0.000101  |ddm|= 3.94e-05
+  alpha nocc = 2  HOMO = 0.24144808280996  LUMO = 0.694693317027023
+  beta  nocc = 1  HOMO = 0.182650903487504  LUMO = 0.500361417793388
+cycle= 12 E= -0.266475549416966  delta_E= -1.74e-09  |g|= 9.56e-05  |ddm|= 3.11e-05
+  alpha nocc = 2  HOMO = 0.241447069437327  LUMO = 0.694690690419398
+  beta  nocc = 1  HOMO = 0.182643741243939  LUMO = 0.500370357031768
+cycle= 13 E= -0.266475550791763  delta_E= -1.37e-09  |g|= 9.12e-05  |ddm|= 2.59e-05
+  alpha nocc = 2  HOMO = 0.241446196026105  LUMO = 0.694688426590345
+  beta  nocc = 1  HOMO = 0.182637574016241  LUMO = 0.50037805554437
+cycle= 14 E= -0.266475551924167  delta_E= -1.13e-09  |g|= 8.74e-05  |ddm|= 2.23e-05
+  alpha nocc = 2  HOMO = 0.241445423479756  LUMO = 0.694686424076255
+  beta  nocc = 1  HOMO = 0.182632118846114  LUMO = 0.500384865081043
+cycle= 15 E= -0.266475552885692  delta_E= -9.62e-10  |g|= 8.4e-05  |ddm|= 1.98e-05
+  alpha nocc = 2  HOMO = 0.241444728249836  LUMO = 0.694684621949644
+  beta  nocc = 1  HOMO = 0.182627212025893  LUMO = 0.500390990592554
+cycle= 16 E= -0.266475553718613  delta_E= -8.33e-10  |g|= 8.1e-05  |ddm|= 1.78e-05
+  alpha nocc = 2  HOMO = 0.241444093214895  LUMO = 0.694682975756296
+  beta  nocc = 1  HOMO = 0.182622729117505  LUMO = 0.500396586650218
+cycle= 17 E= -0.266475554452849  delta_E= -7.34e-10  |g|= 7.82e-05  |ddm|= 1.62e-05
+  alpha nocc = 2  HOMO = 0.241426254096363  LUMO = 0.694636709995653
+  beta  nocc = 1  HOMO = 0.182496422288865  LUMO = 0.500554185715241
+cycle= 18 E= -0.266475564687215  delta_E= -1.02e-08  |g|= 5.65e-07  |ddm|= 0.000456
+  alpha nocc = 2  HOMO = 0.241426101292459  LUMO = 0.694636325564667
+  beta  nocc = 1  HOMO = 0.182496062478953  LUMO = 0.50055477759938
+cycle= 19 E= -0.26647556468795  delta_E= -7.35e-13  |g|= 2e-07  |ddm|= 4.26e-06
+  alpha nocc = 2  HOMO = 0.241426068400919  LUMO = 0.694636198524694
+  beta  nocc = 1  HOMO = 0.182495684690468  LUMO = 0.500555139410682
+Extra cycle  E= -0.266475564687999  delta_E= -4.88e-14  |g|= 7.93e-08  |ddm|= 6.53e-07
+converged SCF energy = -0.266475564687999  <S^2> = 0.75924546  2S+1 = 2.0092242
+**** SCF Summaries ****
+Total Energy =                          -0.266475564687999
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.914147309200860
+Two-electron Energy =                    0.647671744512861
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0427255899881188 | 0.182495684690468  occ= 1 | 1
+MO #2   energy= 0.241426068400919  | 0.500555139410682  occ= 1 | 0
+MO #3   energy= 0.694636198524694  | 0.709008380274606  occ= 0 | 0
+MO #4   energy= 0.694636198524694  | 0.709008380274606  occ= 0 | 0
+MO #5   energy= 0.694636198524694  | 0.709008380274606  occ= 0 | 0
+MO #6   energy= 1.12747775926911   | 1.28128950327412   occ= 0 | 0
+MO #7   energy= 2.20736817690743   | 2.30232902043056   occ= 0 | 0
+MO #8   energy= 2.20736817690743   | 2.30232902043056   occ= 0 | 0
+MO #9   energy= 2.20736817690743   | 2.30232902043056   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.62353
+spin_pop of  0 H 2s        0.14718
+spin_pop of  0 H 3s        0.22929
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.99189 | 0.36836   
+pop of  0 H 2s        0.67470 | 0.52752   
+pop of  0 H 3s        0.33341 | 0.10412   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 163 MB)
+Init t2, MP2 energy = -0.0106554034403354
+Init E_corr(CCSD) = -0.0106554034403417
+cycle = 1  E_corr(CCSD) = -0.0137323207498373  dE = -0.00307691731  norm(t1,t2) = 0.0493924
+cycle = 2  E_corr(CCSD) = -0.0154072980740958  dE = -0.00167497732  norm(t1,t2) = 0.0368694
+cycle = 3  E_corr(CCSD) = -0.019172752350232  dE = -0.00376545428  norm(t1,t2) = 0.027053
+cycle = 4  E_corr(CCSD) = -0.0187449426742712  dE = 0.000427809676  norm(t1,t2) = 0.00304546
+cycle = 5  E_corr(CCSD) = -0.0188511952146523  dE = -0.00010625254  norm(t1,t2) = 0.000855496
+cycle = 6  E_corr(CCSD) = -0.0188392362063684  dE = 1.19590083e-05  norm(t1,t2) = 0.00010245
+cycle = 7  E_corr(CCSD) = -0.0188381560722458  dE = 1.08013412e-06  norm(t1,t2) = 9.24781e-06
+cycle = 8  E_corr(CCSD) = -0.01883850550927  dE = -3.49437024e-07  norm(t1,t2) = 3.7496e-06
+cycle = 9  E_corr(CCSD) = -0.0188385325578444  dE = -2.70485744e-08  norm(t1,t2) = 2.70351e-07
+UCCSD converged
+E(UCCSD) = -0.2853140972458434  E_corr = -0.01883853255784441
+UCCSD(T) correction = -1.92826436217607e-05
+cycle = 1  norm(lambda1,lambda2) = 0.0106821
+cycle = 2  norm(lambda1,lambda2) = 0.00341186
+cycle = 3  norm(lambda1,lambda2) = 0.00122231
+cycle = 4  norm(lambda1,lambda2) = 0.000242307
+cycle = 5  norm(lambda1,lambda2) = 7.66676e-05
+cycle = 6  norm(lambda1,lambda2) = 1.09151e-05
+cycle = 7  norm(lambda1,lambda2) = 2.98263e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 163 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.314154268179592
+  alpha nocc = 2  HOMO = 0.0883313924356973  LUMO = 0.314317229475055
+  beta  nocc = 1  HOMO = -0.176046745026764  LUMO = 0.0883313924356973
+
+WARN: system HOMO 0.0883313924356973 >= system LUMO 0.0883313924356973
+
+cycle= 1 E= -0.147246712553752  delta_E= 0.167  |g|= 0.147  |ddm|= 2.59
+  alpha nocc = 2  HOMO = 0.315711418132154  LUMO = 0.809388473317888
+  beta  nocc = 1  HOMO = 0.233151737542616  LUMO = 0.464122270849583
+cycle= 2 E= -0.19485769206078  delta_E= -0.0476  |g|= 0.0516  |ddm|= 0.594
+  alpha nocc = 2  HOMO = 0.272245395399426  LUMO = 0.748370830173745
+  beta  nocc = 1  HOMO = 0.178025391398136  LUMO = 0.483261290225661
+cycle= 3 E= -0.208505506105825  delta_E= -0.0136  |g|= 0.0431  |ddm|= 0.304
+  alpha nocc = 2  HOMO = 0.240722606168396  LUMO = 0.677780463318971
+  beta  nocc = 1  HOMO = 0.161871492415693  LUMO = 0.552790300789328
+cycle= 4 E= -0.220404770840131  delta_E= -0.0119  |g|= 0.0173  |ddm|= 0.916
+  alpha nocc = 2  HOMO = 0.246369999084334  LUMO = 0.696594899904806
+  beta  nocc = 1  HOMO = 0.185866995004191  LUMO = 0.522059835365988
+cycle= 5 E= -0.221014820204282  delta_E= -0.00061  |g|= 0.00299  |ddm|= 0.137
+  alpha nocc = 2  HOMO = 0.246261001001525  LUMO = 0.696389724945947
+  beta  nocc = 1  HOMO = 0.189953495438242  LUMO = 0.517583561274492
+cycle= 6 E= -0.221023886226738  delta_E= -9.07e-06  |g|= 0.00121  |ddm|= 0.0177
+  alpha nocc = 2  HOMO = 0.246900726035606  LUMO = 0.698033182428828
+  beta  nocc = 1  HOMO = 0.192195758194153  LUMO = 0.514485740563005
+cycle= 7 E= -0.221026770390203  delta_E= -2.88e-06  |g|= 0.00059  |ddm|= 0.0152
+  alpha nocc = 2  HOMO = 0.246685148717645  LUMO = 0.697480308648416
+  beta  nocc = 1  HOMO = 0.191252670607343  LUMO = 0.515742509954067
+cycle= 8 E= -0.221027455782399  delta_E= -6.85e-07  |g|= 9.68e-05  |ddm|= 0.00506
+  alpha nocc = 2  HOMO = 0.246701581949226  LUMO = 0.697523571021018
+  beta  nocc = 1  HOMO = 0.191338983272955  LUMO = 0.515632288292603
+cycle= 9 E= -0.22102746965258  delta_E= -1.39e-08  |g|= 3.89e-05  |ddm|= 0.000378
+  alpha nocc = 2  HOMO = 0.246705757812528  LUMO = 0.69753456098244
+  beta  nocc = 1  HOMO = 0.19136105413451  LUMO = 0.515604134948165
+cycle= 10 E= -0.22102747128951  delta_E= -1.64e-09  |g|= 2.41e-05  |ddm|= 9.6e-05
+  alpha nocc = 2  HOMO = 0.246707664927567  LUMO = 0.697539579670273
+  beta  nocc = 1  HOMO = 0.191371165722016  LUMO = 0.515591243890733
+cycle= 11 E= -0.22102747178156  delta_E= -4.92e-10  |g|= 1.74e-05  |ddm|= 4.38e-05
+  alpha nocc = 2  HOMO = 0.246708752394141  LUMO = 0.697542441284981
+  beta  nocc = 1  HOMO = 0.191376943868578  LUMO = 0.515583880216488
+cycle= 12 E= -0.221027471990243  delta_E= -2.09e-10  |g|= 1.35e-05  |ddm|= 2.5e-05
+  alpha nocc = 2  HOMO = 0.246709452560165  LUMO = 0.697544283706574
+  beta  nocc = 1  HOMO = 0.191380670475988  LUMO = 0.515579132450389
+cycle= 13 E= -0.22102747209693  delta_E= -1.07e-10  |g|= 1.1e-05  |ddm|= 1.61e-05
+  alpha nocc = 2  HOMO = 0.246709939988507  LUMO = 0.697545566304306
+  beta  nocc = 1  HOMO = 0.191383268211087  LUMO = 0.515575823645156
+cycle= 14 E= -0.221027472158387  delta_E= -6.15e-11  |g|= 9.26e-06  |ddm|= 1.12e-05
+  alpha nocc = 2  HOMO = 0.246710297662106  LUMO = 0.697546507494265
+  beta  nocc = 1  HOMO = 0.191385177136585  LUMO = 0.515573392822045
+cycle= 15 E= -0.221027472196789  delta_E= -3.84e-11  |g|= 7.99e-06  |ddm|= 8.22e-06
+  alpha nocc = 2  HOMO = 0.246710571398977  LUMO = 0.697547227790263
+  beta  nocc = 1  HOMO = 0.191386639282833  LUMO = 0.515571531181451
+cycle= 16 E= -0.221027472222344  delta_E= -2.56e-11  |g|= 7.01e-06  |ddm|= 6.29e-06
+  alpha nocc = 2  HOMO = 0.246710787179356  LUMO = 0.697547795584658
+  beta  nocc = 1  HOMO = 0.191387792960889  LUMO = 0.515570062537729
+cycle= 17 E= -0.221027472240144  delta_E= -1.78e-11  |g|= 6.24e-06  |ddm|= 4.96e-06
+  alpha nocc = 2  HOMO = 0.246712666844016  LUMO = 0.697552740812608
+  beta  nocc = 1  HOMO = 0.19139770401803  LUMO = 0.515557414703317
+cycle= 18 E= -0.221027472307535  delta_E= -6.74e-11  |g|= 4.04e-07  |ddm|= 4.32e-05
+  alpha nocc = 2  HOMO = 0.246712577065125  LUMO = 0.697552451573063
+  beta  nocc = 1  HOMO = 0.19139712497473  LUMO = 0.51555799821823
+Extra cycle  E= -0.221027472307771  delta_E= -2.37e-13  |g|= 1.95e-07  |ddm|= 1.24e-06
+converged SCF energy = -0.221027472307771  <S^2> = 0.75763978  2S+1 = 2.0076252
+**** SCF Summaries ****
+Total Energy =                          -0.221027472307771
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.852036876495074
+Two-electron Energy =                    0.631009404187303
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0281277029744936 | 0.19139712497473   occ= 1 | 1
+MO #2   energy= 0.246712577065125  | 0.51555799821823   occ= 1 | 0
+MO #3   energy= 0.697552451573063  | 0.714805835022606  occ= 0 | 0
+MO #4   energy= 0.697552451573064  | 0.714805835022606  occ= 0 | 0
+MO #5   energy= 0.697552451573064  | 0.714805835022606  occ= 0 | 0
+MO #6   energy= 1.14721287817528   | 1.30379110759188   occ= 0 | 0
+MO #7   energy= 2.21535699270367   | 2.31119492014917   occ= 0 | 0
+MO #8   energy= 2.21535699270367   | 2.31119492014917   occ= 0 | 0
+MO #9   energy= 2.21535699270367   | 2.31119492014917   occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.65913
+spin_pop of  0 H 2s        0.11845
+spin_pop of  0 H 3s        0.22242
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.98880 | 0.32967   
+pop of  0 H 2s        0.67182 | 0.55336   
+pop of  0 H 3s        0.33938 | 0.11697   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 163 MB)
+Init t2, MP2 energy = -0.00958378306403725
+Init E_corr(CCSD) = -0.00958378306408619
+cycle = 1  E_corr(CCSD) = -0.0123340259454146  dE = -0.00275024288  norm(t1,t2) = 0.0472382
+cycle = 2  E_corr(CCSD) = -0.0138512943271144  dE = -0.00151726838  norm(t1,t2) = 0.0349904
+cycle = 3  E_corr(CCSD) = -0.0172481472253683  dE = -0.0033968529  norm(t1,t2) = 0.0255733
+cycle = 4  E_corr(CCSD) = -0.0168937183565196  dE = 0.000354428869  norm(t1,t2) = 0.0026628
+cycle = 5  E_corr(CCSD) = -0.0169749101389419  dE = -8.11917824e-05  norm(t1,t2) = 0.000690628
+cycle = 6  E_corr(CCSD) = -0.0169664302862522  dE = 8.47985269e-06  norm(t1,t2) = 8.20934e-05
+cycle = 7  E_corr(CCSD) = -0.0169654860674277  dE = 9.44218825e-07  norm(t1,t2) = 8.1292e-06
+cycle = 8  E_corr(CCSD) = -0.0169657995175084  dE = -3.13450081e-07  norm(t1,t2) = 3.45696e-06
+cycle = 9  E_corr(CCSD) = -0.0169658339587317  dE = -3.44412233e-08  norm(t1,t2) = 3.37607e-07
+UCCSD converged
+E(UCCSD) = -0.2379933062665031  E_corr = -0.01696583395873172
+UCCSD(T) correction = -1.90657246813849e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00946564
+cycle = 2  norm(lambda1,lambda2) = 0.00304083
+cycle = 3  norm(lambda1,lambda2) = 0.00109943
+cycle = 4  norm(lambda1,lambda2) = 0.000240784
+cycle = 5  norm(lambda1,lambda2) = 7.17474e-05
+cycle = 6  norm(lambda1,lambda2) = 8.11644e-06
+
+
+******** <class 'pyscf.qmmm.itrf.qmmm_for_scf.<locals>.QMMM'> ********
+method = QMMM-UHF
+initial guess = minao
+damping factor = 0
+level_shift factor = 0
+DIIS = <class 'pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 16
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = 1e-06
+SCF max_cycles = 200
+direct_scf = True
+direct_scf_tol = 1e-13
+max_memory 32000 MB (current use 163 MB)
+number electrons alpha = 2  beta = 1
+** Add background charges for <class 'pyscf.scf.uhf.UHF'> **
+init E= -0.30331361829436
+  alpha nocc = 2  HOMO = 0.0910162071797261  LUMO = 0.318203630346298
+  beta  nocc = 1  HOMO = -0.167609168693289  LUMO = 0.0910162071797261
+
+WARN: system HOMO 0.0910162071797261 >= system LUMO 0.0910162071797261
+
+cycle= 1 E= -0.131028310899741  delta_E= 0.172  |g|= 0.147  |ddm|= 2.61
+  alpha nocc = 2  HOMO = 0.319102931016936  LUMO = 0.811505281895752
+  beta  nocc = 1  HOMO = 0.23678164840111  LUMO = 0.468037566015441
+cycle= 2 E= -0.179446089086359  delta_E= -0.0484  |g|= 0.0528  |ddm|= 0.595
+  alpha nocc = 2  HOMO = 0.274029057118295  LUMO = 0.748966420340173
+  beta  nocc = 1  HOMO = 0.181497807305585  LUMO = 0.488183079802894
+cycle= 3 E= -0.193668695907499  delta_E= -0.0142  |g|= 0.0436  |ddm|= 0.316
+  alpha nocc = 2  HOMO = 0.242361502006319  LUMO = 0.678611738710317
+  beta  nocc = 1  HOMO = 0.165316171801128  LUMO = 0.557191967072065
+cycle= 4 E= -0.205512130014199  delta_E= -0.0118  |g|= 0.0176  |ddm|= 0.917
+  alpha nocc = 2  HOMO = 0.248084978477079  LUMO = 0.697444004627511
+  beta  nocc = 1  HOMO = 0.188575029355017  LUMO = 0.527293854945872
+cycle= 5 E= -0.206137428005967  delta_E= -0.000625  |g|= 0.00319  |ddm|= 0.137
+  alpha nocc = 2  HOMO = 0.248099895874233  LUMO = 0.697567684865931
+  beta  nocc = 1  HOMO = 0.192773657327715  LUMO = 0.522548106542547
+cycle= 6 E= -0.20614821676276  delta_E= -1.08e-05  |g|= 0.00121  |ddm|= 0.0161
+  alpha nocc = 2  HOMO = 0.248772893421782  LUMO = 0.699291289790135
+  beta  nocc = 1  HOMO = 0.195098047433498  LUMO = 0.519357516319261
+cycle= 7 E= -0.206150805030533  delta_E= -2.59e-06  |g|= 0.000656  |ddm|= 0.0156
+  alpha nocc = 2  HOMO = 0.248533670083647  LUMO = 0.698681539268577
+  beta  nocc = 1  HOMO = 0.194132899373811  LUMO = 0.520654963748235
+cycle= 8 E= -0.20615167941449  delta_E= -8.74e-07  |g|= 6.89e-05  |ddm|= 0.00551
+  alpha nocc = 2  HOMO = 0.248543858361237  LUMO = 0.698708353842807
+  beta  nocc = 1  HOMO = 0.194183244180402  LUMO = 0.520590514640694
+cycle= 9 E= -0.206151685730147  delta_E= -6.32e-09  |g|= 3.46e-05  |ddm|= 0.000228
+  alpha nocc = 2  HOMO = 0.248547301963922  LUMO = 0.698717414531918
+  beta  nocc = 1  HOMO = 0.194200346449935  LUMO = 0.520568641465287
+cycle= 10 E= -0.206151686916296  delta_E= -1.19e-09  |g|= 2.29e-05  |ddm|= 7.71e-05
+  alpha nocc = 2  HOMO = 0.248549023812765  LUMO = 0.698721944458446
+  beta  nocc = 1  HOMO = 0.194208921728133  LUMO = 0.520557679620286
+cycle= 11 E= -0.206151687329069  delta_E= -4.13e-10  |g|= 1.71e-05  |ddm|= 3.85e-05
+  alpha nocc = 2  HOMO = 0.248550053591097  LUMO = 0.698724653478679
+  beta  nocc = 1  HOMO = 0.194214060585964  LUMO = 0.520551112996393
+cycle= 12 E= -0.20615168751838  delta_E= -1.89e-10  |g|= 1.36e-05  |ddm|= 2.3e-05
+  alpha nocc = 2  HOMO = 0.24855073751141  LUMO = 0.698726452569868
+  beta  nocc = 1  HOMO = 0.194217478694478  LUMO = 0.520546746417492
+cycle= 13 E= -0.206151687620269  delta_E= -1.02e-10  |g|= 1.13e-05  |ddm|= 1.53e-05
+  alpha nocc = 2  HOMO = 0.248551224169706  LUMO = 0.698727732702069
+  beta  nocc = 1  HOMO = 0.194219913874184  LUMO = 0.520543636199921
+cycle= 14 E= -0.206151687681171  delta_E= -6.09e-11  |g|= 9.62e-06  |ddm|= 1.09e-05
+  alpha nocc = 2  HOMO = 0.248551587590216  LUMO = 0.698728688650593
+  beta  nocc = 1  HOMO = 0.194221734490206  LUMO = 0.520541311402214
+cycle= 15 E= -0.206151687720356  delta_E= -3.92e-11  |g|= 8.38e-06  |ddm|= 8.12e-06
+  alpha nocc = 2  HOMO = 0.248551869058379  LUMO = 0.69872942902645
+  beta  nocc = 1  HOMO = 0.194223146022931  LUMO = 0.520539509323743
+cycle= 16 E= -0.206151687747003  delta_E= -2.66e-11  |g|= 7.42e-06  |ddm|= 6.29e-06
+  alpha nocc = 2  HOMO = 0.24855209361201  LUMO = 0.698730019670419
+  beta  nocc = 1  HOMO = 0.194224272877776  LUMO = 0.520538070854122
+cycle= 17 E= -0.206151687765942  delta_E= -1.89e-11  |g|= 6.66e-06  |ddm|= 5.02e-06
+  alpha nocc = 2  HOMO = 0.248554200665108  LUMO = 0.698735562063267
+  beta  nocc = 1  HOMO = 0.19423472862582  LUMO = 0.520524696234642
+cycle= 18 E= -0.206151687843128  delta_E= -7.72e-11  |g|= 4.7e-07  |ddm|= 4.72e-05
+  alpha nocc = 2  HOMO = 0.248554092784945  LUMO = 0.698735211785993
+  beta  nocc = 1  HOMO = 0.194234049879832  LUMO = 0.520525378500059
+Extra cycle  E= -0.206151687843444  delta_E= -3.16e-13  |g|= 2.24e-07  |ddm|= 1.47e-06
+converged SCF energy = -0.206151687843444  <S^2> = 0.75715499  2S+1 = 2.0071422
+**** SCF Summaries ****
+Total Energy =                          -0.206151687843444
+Nuclear Repulsion Energy =               0.000000000000000
+One-electron Energy =                   -0.832274175059990
+Two-electron Energy =                    0.626122487216546
+**** MO energy ****
+                             alpha | beta                alpha | beta
+MO #1   energy= -0.0228172709074417 | 0.194234049879832  occ= 1 | 1
+MO #2   energy= 0.248554092784945  | 0.520525378500059  occ= 1 | 0
+MO #3   energy= 0.698735211785993  | 0.716918045353745  occ= 0 | 0
+MO #4   energy= 0.698735211785994  | 0.716918045353745  occ= 0 | 0
+MO #5   energy= 0.698735211785994  | 0.716918045353745  occ= 0 | 0
+MO #6   energy= 1.15434470619047   | 1.31154701173179   occ= 0 | 0
+MO #7   energy= 2.21854817994799   | 2.3145011561991    occ= 0 | 0
+MO #8   energy= 2.21854817994799   | 2.3145011561991    occ= 0 | 0
+MO #9   energy= 2.21854817994799   | 2.3145011561991    occ= 0 | 0
+
+To work with the spin densities directly, `use mulliken_meta_spin()` only printing them here.
+
+ ** Mulliken spin pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken Spin Density (per AO)  **
+spin_pop of  0 H 1s        0.66943
+spin_pop of  0 H 2s        0.10999
+spin_pop of  0 H 3s        0.22058
+spin_pop of  0 H 2px       0.00000
+spin_pop of  0 H 2py       0.00000
+spin_pop of  0 H 2pz       0.00000
+spin_pop of  0 H 3px       0.00000
+spin_pop of  0 H 3py       0.00000
+spin_pop of  0 H 3pz       0.00000
+ ** Mulliken Spin Density (per atom)  **
+spin density of  0 H =      1.00000
+ ** Mulliken pop alpha/beta on meta-lowdin orthogonal AOs **
+ ** Mulliken pop       alpha | beta **
+pop of  0 H 1s        0.98760 | 0.31817   
+pop of  0 H 2s        0.67081 | 0.56082   
+pop of  0 H 3s        0.34159 | 0.12101   
+pop of  0 H 2px       0.00000 | 0.00000   
+pop of  0 H 2py       0.00000 | 0.00000   
+pop of  0 H 2pz       0.00000 | 0.00000   
+pop of  0 H 3px       0.00000 | 0.00000   
+pop of  0 H 3py       0.00000 | 0.00000   
+pop of  0 H 3pz       0.00000 | 0.00000   
+In total             2.00000 | 1.00000   
+ ** Mulliken atomic charges   ( Nelec_alpha | Nelec_beta ) **
+charge of  0H =     -2.00000  (     2.00000      1.00000 )
+Dipole moment(X, Y, Z, Debye):  0.00000,  0.00000,  0.00000
+
+******** <class 'pyscf.cc.uccsd.UCCSD'> ********
+CC2 = 0
+CCSD nocc = (2, 1), nmo = (9, 9)
+max_cycle = 200
+direct = 0
+conv_tol = 1e-07
+conv_tol_normt = 1e-05
+diis_space = 12
+diis_start_cycle = 0
+diis_start_energy_diff = 1e+09
+max_memory 32000 MB (current use 163 MB)
+Init t2, MP2 energy = -0.00926702471621405
+Init E_corr(CCSD) = -0.00926702471627742
+cycle = 1  E_corr(CCSD) = -0.0119210667379734  dE = -0.00265404202  norm(t1,t2) = 0.0464937
+cycle = 2  E_corr(CCSD) = -0.0133889133956287  dE = -0.00146784666  norm(t1,t2) = 0.0343168
+cycle = 3  E_corr(CCSD) = -0.0166568651900524  dE = -0.00326795179  norm(t1,t2) = 0.0250266
+cycle = 4  E_corr(CCSD) = -0.0163256286445494  dE = 0.000331236546  norm(t1,t2) = 0.00254564
+cycle = 5  E_corr(CCSD) = -0.0163996201727973  dE = -7.39915282e-05  norm(t1,t2) = 0.000643317
+cycle = 6  E_corr(CCSD) = -0.0163919749030364  dE = 7.64526976e-06  norm(t1,t2) = 7.72396e-05
+cycle = 7  E_corr(CCSD) = -0.0163911231821943  dE = 8.51720842e-07  norm(t1,t2) = 7.63497e-06
+cycle = 8  E_corr(CCSD) = -0.016391442227144  dE = -3.1904495e-07  norm(t1,t2) = 3.43371e-06
+cycle = 9  E_corr(CCSD) = -0.0163914725624156  dE = -3.03352716e-08  norm(t1,t2) = 2.84887e-07
+UCCSD converged
+E(UCCSD) = -0.2225431604058596  E_corr = -0.01639147256241564
+UCCSD(T) correction = -1.89315014262337e-05
+cycle = 1  norm(lambda1,lambda2) = 0.00904214
+cycle = 2  norm(lambda1,lambda2) = 0.00290888
+cycle = 3  norm(lambda1,lambda2) = 0.00105425
+cycle = 4  norm(lambda1,lambda2) = 0.00023687
+cycle = 5  norm(lambda1,lambda2) = 6.89882e-05
+cycle = 6  norm(lambda1,lambda2) = 7.28884e-06
