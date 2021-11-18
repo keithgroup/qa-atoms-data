@@ -47,7 +47,7 @@ prelim_calc_if_fail = True  # Tried second.
 smaller_basis = 'cc-pVDZ'
 
 # Specifying alchemical parts.
-max_apdft_order = 4
+max_qa_order = 4
 lambda_step = 0.25
 lambda_limits = (0, 4)
 specific_atom_lambda = None
@@ -434,7 +434,7 @@ lambda_qc_data = get_qc_data(qc_method_lower, lambda_atom_values)
 # Gets a stencil (framework) for computing finite differences of different orders.
 def get_stencil():
     stencil = [{'coefficients': np.array([1]), "offsets": np.array([0])}]  # 0th order approximation.
-    for order in range(1, max_apdft_order+1):
+    for order in range(1, max_qa_order+1):
         stencil.append(findiff.coefficients(deriv=order, acc=finite_diff_accuracy)['center'])
     return stencil
 s = get_stencil()
@@ -462,12 +462,12 @@ def qats_pred(poly_coeffs, order, lambda_values):
     return np.polyval(poly_coeffs[:order+1][::-1], lambda_values)
 
 lambda_qats_energies = []
-for order in range(0, max_apdft_order+1):
+for order in range(0, max_qa_order+1):
     lambda_qats_energies.append(qats_pred(poly_coeffs, order, lambda_values))
 
 # Plotting predictions.
 plt.plot(lambda_values, lambda_qc_data['total_energies'], label=f'{qc_method_label}/{basis_set}', color=ref_color)
-for order in range(0, max_apdft_order+1):
+for order in range(0, max_qa_order+1):
     plt.plot(
         lambda_values,
         lambda_qats_energies[order],  # APDFT predictions
@@ -485,7 +485,7 @@ plt.savefig(f'{work_dir}/{calc_label}-qc.apdft.energies.png', dpi=1000)
 plt.close()
 
 # Plotting error.
-for order in range(0, max_apdft_order+1):
+for order in range(0, max_qa_order+1):
     plt.plot(
         lambda_values,
         lambda_qats_energies[order] - lambda_qc_data['total_energies'],
@@ -516,7 +516,7 @@ else:
     all_dispersion_energies = np.take_along_axis(np.hstack((lambda_qc_data['dispersion_energies'], fd_qc_data['dispersion_energies'][1:])), sort_i, axis=0)
 
 qats_energies = {}
-for order in range(0, max_apdft_order+1):
+for order in range(0, max_qa_order+1):
     qats_energies[str(order)] = qats_pred(poly_coeffs, order, all_lambdas)
 
 
