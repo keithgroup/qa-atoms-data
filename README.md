@@ -1,12 +1,12 @@
 # Quantum alchemy data - Atoms
 
-All PySCF calculation logs and JSON files for the atom study of quantum alchemy/APDFT.
+All PySCF calculation logs and JSON files for the atom study of quantum alchemy.
 A cumulative JSON file is provided with all files organized by atom and state (i.e., charge and multiplicity).
 
 ## Data generation
 
-A [generator Python script](https://github.com/keithgroup/apdft-atoms-dimers/blob/main/scripts/pyscf-calc-generator/generate-pyscf.apdft-calculations.py) is used with dictionary of all desired calculations.
-For more information, visit the [keithgroup/apdft-atoms-dimers](https://github.com/keithgroup/apdft-atoms-dimers) repository.
+A [generator Python script](https://github.com/keithgroup/qa-atoms-dimers/blob/main/scripts/pyscf-calc-generator/generate-pyscf.qa-calculations.py) is used with dictionary of all desired calculations.
+For more information, visit the [keithgroup/qa-atoms-dimers](https://github.com/keithgroup/qa-atoms-dimers) repository.
 
 ## JSON data
 
@@ -116,7 +116,7 @@ Lowercase is always used to speed up navigation with a terminal.
     <br><br>
     **Example**
 
-    Every calculation is labeled as a `pyscf.apdft` calculation as the driver Python script performs several PySCF calculations and calculates data for APDFT.
+    Every calculation is labeled as a `pyscf.qa` calculation as the driver Python script performs several PySCF calculations and calculates data for quantum alchemy.
 
 - `<options>`: Calculation specifications or parameters.
     <br><br>
