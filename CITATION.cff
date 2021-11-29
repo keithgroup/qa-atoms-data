@@ -46,8 +46,8 @@ preferred-citation:
       email: jakeith@pitt.edu
       orcid: "https://orcid.org/0000-0002-6583-6322"
   type: article
-  identifiers:
-    - description: The DOI of the corresponding article.
-      type: doi
-      value: 10.26434/chemrxiv-2021-3l4zh
+  journal: "ChemRxiv"
+  date-released: "2021-11-22"
+  publisher: Cambridge Open Engage
+  doi: 10.26434/chemrxiv-2021-3l4zh
 cff-version: 1.2.0

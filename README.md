@@ -129,19 +129,7 @@ Lowercase is always used to speed up navigation with a terminal.
 
 ## Citation
 
-If you use this dataset, please cite the corresponding [manuscript](https://doi.org/10.26434/chemrxiv-2021-3l4zh) (BibTeX shown below) as well as the repository as specified in `CITATION.cff`.
-More information about the citation file format can be found [here](https://citation-file-format.github.io/).
-
-```text
-@article{eikey2021evaluating,
-    author = {Eikey, Emily A. and Maldonado, Alex M. and Griego, Charles D. and von Rudorff, Guido Falk and Keith, John A.},
-    title = {Evaluating quantum alchemy of atoms with thermodynamic cycles: Beyond ground electronic states},
-    journal = {ChemRxiv},
-    year = {2021},
-    doi = {10.26434/chemrxiv-2021-3l4zh},
-    publisher = {Cambridge Open Engage}
-}
-```
+If you use this dataset, please cite the corresponding [manuscript](https://doi.org/10.26434/chemrxiv-2021-3l4zh) in addition to this repository as specified in `CITATION.cff`.
 
 ## License
 
