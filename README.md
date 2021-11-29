@@ -127,6 +127,22 @@ Lowercase is always used to speed up navigation with a terminal.
     In these data, all coupled cluster triples corrections are perturbative.
     In the directory names, the `u` (for unrestricted) is typically dropped, but included in the file names.
 
+## Citation
+
+If you use this dataset, please cite the corresponding [manuscript](https://doi.org/10.26434/chemrxiv-2021-3l4zh) (BibTeX shown below) as well as the repository as specified in `CITATION.cff`.
+More information about the citation file format can be found [here](https://citation-file-format.github.io/).
+
+```text
+@article{eikey2021evaluating,
+    author = {Eikey, Emily A. and Maldonado, Alex M. and Griego, Charles D. and von Rudorff, Guido Falk and Keith, John A.},
+    title = {Evaluating quantum alchemy of atoms with thermodynamic cycles: Beyond ground electronic states},
+    journal = {ChemRxiv},
+    year = {2021},
+    doi = {10.26434/chemrxiv-2021-3l4zh},
+    publisher = {Cambridge Open Engage}
+}
+```
+
 ## License
 
 [![CC BY 4.0][cc-by-shield]][cc-by]
