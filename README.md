@@ -20,7 +20,7 @@ JSONs contain the following information.
     - `"geometry"`: Cartesian coordinates of all atoms in the system.
     - `"symbols"`: All chemical symbols in the system in the same order as in the `"geometry"`.
 - `"molecular_charge"`: Total system charge.
-- `"molecular_multiplicity"`: Multiplicity of the system, $2S + 1$.
+- `"molecular_multiplicity"`: Multiplicity of the system, 2S + 1.
 - `"name"`: Unique name specifying the calculation.
 - `"atomic_numbers"`: List of atomic numbers of all atoms in the system in the same order as `"geometry"`.
 - `"n_electrons"`: Total number of electrons in the system.
@@ -32,19 +32,22 @@ JSONs contain the following information.
     - `"cc_conv_tol"`: Change in coupled cluster electronic energy convergence criteria.
     - `"cc_conv_tol_normt"`: Norm of the coupled cluster amplitude vectors convergence criteria.
 - `"broken_symmetry"`: If start with an excited state guess.
-- `"finite_diff_delta"`: $h$ used for central finite differences.
+- `"finite_diff_delta"`: h used for central finite differences.
 - `"finite_diff_acc"`: General accuracy for central finite difference.
 - `"qa_lambdas"`: List of all calculations and their change in nuclear charge.
 - `"electronic_energies"`: Total electronic energies of the systems.
-- `"qats_energies"`: Predicted total electron energies with a Taylor series of $n$th order.
+- `"qats_energies"`: Predicted total electron energies with a Taylor series of nth order.
 - `"qats_poly_coeffs"`: Taylor series polynomial coefficients (derivatives are from finite differences).
 - `"hf_energies"`: Hartree&ndash;Fock energy contributions (if we are using coupled cluster).
 - `"triples_corrections"`: Perturbative triple corrections (if selected).
 - `"scf_converged"`: If the SCF iterations have converged.
 - `"cc_converged"`: If the coupled cluster iterations have converged.
-- `"scf_spin_squared"`: Spin squared expectation value of the last SCF iteration, $S(S + 1)$.
-- `"cc_spin_squared"`: Spin squared expectation value of the last coupled cluster iteration, $S(S + 1)$.
+- `"scf_spin_squared"`: Spin squared expectation value of the last SCF iteration, S(S + 1).
+- `"cc_spin_squared"`: Spin squared expectation value of the last coupled cluster iteration, S(S + 1).
 - `"t1_diagnostic"`: T1 diagnostic for coupled cluster calculations.
+
+**Note:** Atom property predictions involving three-electron systems might slightly differ (&#177; 0.001 eV) from values presented in the respective manuscript.
+Data here uses CCSD(T) calculations for three-electron ground state systems; whereas the manuscript does not include the perturbative triples corrections.
 
 <details>
 <summary>Here is an example of a typical JSON file for a unrestricted CCSD(T) calculation.</summary>
@@ -108,7 +111,7 @@ Lowercase is always used to speed up navigation with a terminal.
     <br><br>
     **Example**
 
-    The excited state for a Nitrogen atom with a charge of $-1$ would be labeled as `n.chrg-1.mult1`, whereas the ground state would be `n.chrg-1.mult3`.
+    The excited state for a Nitrogen atom with a charge of -1 would be labeled as `n.chrg-1.mult1`, whereas the ground state would be `n.chrg-1.mult3`.
     Neutral systems are still explicitly defined; for example, the ground state of a neutral Argon atom would be `ar.chrg0.mult1`.
 
 - `<calculation>`: Specification of the program and calculation type for output files.
